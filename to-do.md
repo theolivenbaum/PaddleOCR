@@ -123,6 +123,8 @@ orientation classifier.*
 - [x] Spotting `<|LOC_n|>` post-processing
 - [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
 - [x] The pipeline's HTML-decorated ("pretty") markdown, byte-for-byte against `MarkdownConverter`
+- [x] Cross-page table merging (`restructure_pages(merge_tables=True)`)
+- [ ] Title re-levelling (`assign_levels_to_parsing_res`), the other half of `restructure_pages`
 - [x] Reading-flow block numbering (`update_order_index`), emitted as `block_order`
 - [x] End-to-end parity test on a sample document
 

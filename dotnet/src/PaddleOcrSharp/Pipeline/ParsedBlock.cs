@@ -59,12 +59,25 @@ public sealed record ParsedPage(int Index, int Width, int Height, IReadOnlyList<
 public sealed record ParsedDocument(IReadOnlyList<ParsedPage> Pages)
 {
     /// <summary>
+    /// Rejoins tables that a page break split in two.
+    /// </summary>
+    /// <remarks>
+    /// <c>restructure_pages(merge_tables=True)</c>, which upstream leaves to the caller rather
+    /// than applying to every parse — a table split across pages is only recognisable once the
+    /// whole document is in hand.
+    /// </remarks>
+    public ParsedDocument MergeTablesAcrossPages() => this with { Pages = TableMerger.Apply(Pages) };
+
+    /// <summary>
     /// Renders the whole document as markdown.
     /// </summary>
     /// <remarks>
-    /// Pages are joined by a blank line, as <c>concatenate_markdown_pages</c> does. Pass a
-    /// <paramref name="separator"/> to put a rule or heading between them instead.
+    /// Pages are joined by a blank line, as <c>concatenate_markdown_pages</c> does, except that
+    /// upstream also puts one before the first page. Pass a <paramref name="separator"/> to put a
+    /// rule or a heading between pages instead.
     /// </remarks>
+    /// <param name="options">Formatting options; defaults to the shipped pipeline's.</param>
+    /// <param name="separator">What goes between consecutive pages.</param>
     public string ToMarkdown(MarkdownOptions? options = null, string separator = "\n\n") =>
         string.Join(separator, Pages.Select(page => page.ToMarkdown(options)));
 }
