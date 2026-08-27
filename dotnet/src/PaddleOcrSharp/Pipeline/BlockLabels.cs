@@ -51,6 +51,21 @@ public static class BlockLabels
         "number", "footnote", "header", "header_image", "footer", "footer_image", "aside_text",
     ];
 
+    /// <summary>
+    /// Labels excluded from the page's block ordering.
+    /// </summary>
+    /// <remarks>
+    /// <c>SKIP_ORDER_LABELS</c>. These are the regions that do not belong to the page's reading
+    /// flow — running heads, captions, figures, tables, marginalia — so numbering them alongside
+    /// the prose would make the order say something it does not mean. They keep their position in
+    /// the block list; they just have no order number.
+    /// </remarks>
+    public static readonly string[] SkipOrder =
+    [
+        "figure_title", "vision_footnote", "image", "chart", "table", "header", "header_image",
+        "footer", "footer_image", "footnote", "aside_text",
+    ];
+
     /// <summary>Name of class <paramref name="id"/>, or <c>"unknown"</c> when out of range.</summary>
     public static string Name(int id) => (uint)id < (uint)All.Length ? All[id] : "unknown";
 }

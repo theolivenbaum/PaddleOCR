@@ -9,6 +9,16 @@ namespace PaddleOcrSharp.Pipeline;
 /// <param name="ReadingOrder">Position in the page's reading order.</param>
 public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, int ReadingOrder)
 {
+    /// <summary>
+    /// The block's position in the page's reading flow, counting from one, or
+    /// <see langword="null"/> when the label is one that does not take part.
+    /// </summary>
+    /// <remarks>
+    /// <c>update_order_index</c>. Distinct from <see cref="ReadingOrder"/>, which is the raw
+    /// value the detector's ordering head predicted and is only meaningful as a sort key.
+    /// </remarks>
+    public int? Order { get; init; }
+
     /// <summary>Encoded image bytes when the block is a figure kept as an image.</summary>
     public byte[]? Image { get; init; }
 

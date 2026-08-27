@@ -252,7 +252,7 @@ public sealed class DocumentParser : IDisposable
                 ? blocks
                 : [.. blocks.Where((_, index) => !absorbed.Contains(index))];
 
-            return new ParsedPage(pageIndex, page.Width, page.Height, retained);
+            return new ParsedPage(pageIndex, page.Width, page.Height, BlockOrder.Assign(retained, settings.Markdown.IgnoredLabels));
         }
         finally
         {

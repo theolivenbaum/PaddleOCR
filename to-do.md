@@ -122,6 +122,7 @@ orientation classifier.*
 - [x] Repetition truncation (`truncate_repetitive_content`)
 - [x] Spotting `<|LOC_n|>` post-processing
 - [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
+- [x] Reading-flow block numbering (`update_order_index`), emitted as `block_order`
 - [x] End-to-end parity test on a sample document
 
 ## 11. CLI — `src/PaddleOcrSharp.Cli`
