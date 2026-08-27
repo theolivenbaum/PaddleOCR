@@ -53,6 +53,9 @@ public static class ElementwiseOps
 
         /// <summary>Floor.</summary>
         Floor,
+
+        /// <summary>Hard swish: <c>x · clamp(x + 3, 0, 6) / 6</c>.</summary>
+        HardSwish,
     }
 
     /// <summary>Applies <paramref name="operation"/> element-wise with broadcasting.</summary>
@@ -106,6 +109,13 @@ public static class ElementwiseOps
                 break;
             case Unary.Log:
                 TensorPrimitives.Log(source, destination);
+                break;
+            case Unary.HardSwish:
+                for (int i = 0; i < source.Length; i++)
+                {
+                    destination[i] = source[i] * Math.Clamp(source[i] + 3f, 0f, 6f) * (1f / 6f);
+                }
+
                 break;
             default:
                 for (int i = 0; i < source.Length; i++)
@@ -181,6 +191,85 @@ public static class ElementwiseOps
 
         TensorPrimitives.Max(values, (float)low, output);
         TensorPrimitives.Min(output, (float)high, output);
+        return result;
+    }
+
+    /// <summary>Hard sigmoid: <c>clamp(slope · x + offset, 0, 1)</c>.</summary>
+    public static PaddleTensor HardSigmoid(PaddleTensor input, float slope, float offset)
+    {
+        PaddleTensor result = PaddleTensor.Float([.. input.Shape]);
+        ReadOnlySpan<float> source = input.FloatSpan;
+        Span<float> destination = result.FloatSpan;
+
+        TensorPrimitives.Multiply(source, slope, destination);
+        TensorPrimitives.Add(destination, offset, destination);
+        TensorPrimitives.Max(destination, 0f, destination);
+        TensorPrimitives.Min(destination, 1f, destination);
+        return result;
+    }
+
+    /// <summary>Parametric ReLU: <c>max(0, x) + alpha · min(0, x)</c>.</summary>
+    /// <param name="input">The activations.</param>
+    /// <param name="alpha">One slope (<c>mode = "all"</c>), one per channel, or one per element.</param>
+    /// <param name="mode">Paddle's <c>mode</c> attribute: <c>all</c>, <c>channel</c> or <c>element</c>.</param>
+    /// <param name="channelsLast">Whether the layout is channels-last rather than <c>NCHW</c>.</param>
+    public static PaddleTensor PRelu(
+        PaddleTensor input,
+        PaddleTensor alpha,
+        string mode,
+        bool channelsLast)
+    {
+        PaddleTensor result = PaddleTensor.Float([.. input.Shape]);
+        ReadOnlySpan<float> source = input.FloatSpan;
+        ReadOnlySpan<float> slopes = alpha.FloatSpan;
+        Span<float> destination = result.FloatSpan;
+
+        switch (mode)
+        {
+            case "all":
+            {
+                float slope = slopes[0];
+                for (int i = 0; i < source.Length; i++)
+                {
+                    destination[i] = source[i] >= 0f ? source[i] : slope * source[i];
+                }
+
+                break;
+            }
+
+            case "channel":
+            {
+                int channelAxis = channelsLast ? input.Rank - 1 : 1;
+                int inner = 1;
+                for (int axis = channelAxis + 1; axis < input.Rank; axis++)
+                {
+                    inner *= input.Shape[axis];
+                }
+
+                int channels = input.Rank > 1 ? input.Shape[channelAxis] : 1;
+                for (int i = 0; i < source.Length; i++)
+                {
+                    float slope = slopes[(i / inner) % channels];
+                    destination[i] = source[i] >= 0f ? source[i] : slope * source[i];
+                }
+
+                break;
+            }
+
+            default:
+            {
+                // "element": one slope per element of a single sample, broadcast over the batch.
+                int stride = slopes.Length;
+                for (int i = 0; i < source.Length; i++)
+                {
+                    float slope = slopes[i % stride];
+                    destination[i] = source[i] >= 0f ? source[i] : slope * source[i];
+                }
+
+                break;
+            }
+        }
+
         return result;
     }
 
@@ -349,6 +438,7 @@ public static class ElementwiseOps
                 Unary.Sigmoid => 1.0 / (1.0 + Math.Exp(-value)),
                 Unary.Silu => value / (1.0 + Math.Exp(-value)),
                 Unary.Log => Math.Log(value),
+                Unary.HardSwish => value * Math.Clamp(value + 3.0, 0.0, 6.0) / 6.0,
                 Unary.Floor => Math.Floor(value),
                 _ => value,
             });

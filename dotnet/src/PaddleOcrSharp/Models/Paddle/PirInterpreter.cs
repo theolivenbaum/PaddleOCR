@@ -315,8 +315,24 @@ public sealed class PirInterpreter : IDisposable
                 return [Tensor(values, operation.Inputs[0])];
 
             case "dropout":
-                // is_test is always true in an exported inference program.
-                return [Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[0])];
+            {
+                // is_test is always true in an exported inference program, so no element is ever
+                // dropped. "upscale_in_train" did the rescaling during training and is the
+                // identity here; "downgrade_in_infer" instead shrinks the activations by 1 - p at
+                // inference, and p arrives as the third input rather than as an attribute.
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                string mode = operation.Attribute("mode")?.AsString() ?? "upscale_in_train";
+
+                if (mode != "downgrade_in_infer")
+                {
+                    return [input, input];
+                }
+
+                PaddleTensor? probability = Optional(values, operation.Inputs.ElementAtOrDefault(2));
+                double keep = 1.0 - (probability is null ? 0.0 : probability.FloatSpan[0]);
+                PaddleTensor scaled = ElementwiseOps.Scale(input, keep, 0.0, biasAfterScale: true);
+                return [scaled, scaled];
+            }
 
             case "conv2d":
             case "depthwise_conv2d":
@@ -418,6 +434,50 @@ public sealed class PirInterpreter : IDisposable
                     ElementwiseOps.Apply(
                         Tensor(values, operation.Inputs[0]),
                         approximate ? ElementwiseOps.Unary.GeluTanh : ElementwiseOps.Unary.GeluErf),
+                ];
+            }
+
+            case "hardswish":
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.HardSwish)];
+
+            case "hardsigmoid":
+                return
+                [
+                    ElementwiseOps.HardSigmoid(
+                        Tensor(values, operation.Inputs[0]),
+                        (float)operation.Attribute("slope")!.AsDouble(),
+                        (float)operation.Attribute("offset")!.AsDouble()),
+                ];
+
+            case "prelu":
+                return
+                [
+                    ElementwiseOps.PRelu(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        operation.Attribute("mode")?.AsString() ?? "all",
+                        (operation.Attribute("data_format")?.AsString() ?? "NCHW") is "NHWC" or "NDHWC"),
+                ];
+
+            case "pad3d":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                PaddleTensor paddings = Tensor(values, operation.Inputs[1]);
+
+                int[] amounts = new int[paddings.Count];
+                for (int i = 0; i < amounts.Length; i++)
+                {
+                    amounts[i] = (int)paddings.GetLong(i);
+                }
+
+                return
+                [
+                    PadOps.Pad3d(
+                        input,
+                        amounts,
+                        PadOps.ParseMode(operation.Attribute("mode")?.AsString() ?? "constant"),
+                        (float)(operation.Attribute("pad_value")?.AsDouble() ?? 0.0),
+                        (operation.Attribute("data_format")?.AsString() ?? "NCDHW") == "NDHWC"),
                 ];
             }
 
@@ -719,11 +779,23 @@ public sealed class PirInterpreter : IDisposable
         int height = operation.Attribute("out_h")?.AsInt() ?? -1;
         int width = operation.Attribute("out_w")?.AsInt() ?? -1;
 
+        // Paddle offers the target three ways, in falling priority: an "OutSize" tensor holding
+        // [h, w], a "SizeTensor" list of rank-0 tensors (one per spatial axis, which is how a
+        // size computed at run time from another tensor's shape arrives), and a scale.
         if (operation.Inputs.Length > 1 && operation.Inputs[1] > 0)
         {
             PaddleTensor size = Tensor(values, operation.Inputs[1]);
             height = (int)size.GetLong(0);
             width = (int)size.GetLong(1);
+        }
+        else if (operation.Inputs.Length > 2 && operation.Inputs[2] > 0)
+        {
+            PaddleTensor[] parts = List(values, operation.Inputs[2]);
+            if (parts.Length >= 2)
+            {
+                height = (int)parts[0].GetLong(0);
+                width = (int)parts[1].GetLong(0);
+            }
         }
 
         if (height > 0 && width > 0)
@@ -732,6 +804,16 @@ public sealed class PirInterpreter : IDisposable
         }
 
         double[] scale = operation.Attribute("scale")?.AsDoubleArray() ?? [];
+        if (scale.Length == 0 && operation.Inputs.Length > 3 && operation.Inputs[3] > 0)
+        {
+            PaddleTensor factors = Tensor(values, operation.Inputs[3]);
+            scale = new double[factors.Count];
+            for (int i = 0; i < scale.Length; i++)
+            {
+                scale[i] = factors.IsFloat ? factors.FloatSpan[i] : factors.GetLong(i);
+            }
+        }
+
         double scaleY = scale.Length > 0 ? scale[0] : 1.0;
         double scaleX = scale.Length > 1 ? scale[1] : scaleY;
 

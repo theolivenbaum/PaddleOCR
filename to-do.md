@@ -102,6 +102,7 @@ orientation classifier.*
 - [x] `PP-LCNet_x1_0_doc_ori` orientation classifier (0/90/180/270)
 - [x] `UVDoc` unwarping
 - [x] Wire into pipeline behind `use_doc_orientation_classify` / `use_doc_unwarping`
+- [x] Parity tests vs. Paddle inference for both graphs and both wrappers
 
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`
 
@@ -133,6 +134,7 @@ orientation classifier.*
 - [x] `dump_tokenizer.py`
 - [x] `dump_layout.py`
 - [x] `dump_end_to_end.py`
+- [x] `dump_preprocessing.py` (orientation classifier + UVDoc)
 - [x] README describing fixture generation
 
 ## 13. Hardening

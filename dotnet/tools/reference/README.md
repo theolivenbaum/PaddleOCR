@@ -59,7 +59,8 @@ agree without further configuration.
 | `dump_language.py` | `language.npz` | prompt ids, `get_rope_index`, decoder layers, prefill logits and 24 greedy steps |
 | `dump_tokenizer.py` | `tokenizer.json` | encode and decode over a mixed-script corpus |
 | `dump_layout.py` | `layout.npz` | `cv2.resize` output and every fetched tensor of the PP-DocLayoutV3 graph |
-| `dump_end_to_end.py` | `end_to_end.npz` | layout boxes plus per-block recognised text for a whole page |
+| `dump_end_to_end.py` | `end_to_end.npz`, `end_to_end_table.npz` | layout boxes plus per-block recognised text for a whole page, after the pipeline's own repetition truncation and OTSL→HTML conversion |
+| `dump_preprocessing.py` | `preprocessing.npz` | orientation-classifier inputs and logits for an upright and a rotated page, and UVDoc's input and flattened output |
 
 Run them from this directory:
 

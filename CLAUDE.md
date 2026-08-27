@@ -78,11 +78,19 @@ graph topology and the weights, both of which we would have to take anyway. The 
 by construction instead of by inspection, and the same interpreter also runs UVDoc and the
 orientation classifier.
 
-The interpreter covers ~60 operators: `conv2d` / `depthwise_conv2d` (im2col + GEMM, with a
+The interpreter covers ~65 operators: `conv2d` / `depthwise_conv2d` (im2col + GEMM, with a
 direct path for depthwise), pooling, batch norm, layer norm, softmax, `matmul` / `bmm` / `einsum`,
 `grid_sample` (which is what deformable attention is built on), bilinear and nearest
-interpolation, broadcasting element-wise ops, reductions, `top_k`, `argsort`, `gather_nd`,
-`index_put`, `set_value` and the shape algebra.
+interpolation, `pad3d`, broadcasting element-wise ops and activations (`relu`, `hardswish`,
+`hardsigmoid`, `prelu`, …), reductions, `top_k`, `argsort`, `gather_nd`, `index_put`,
+`set_value` and the shape algebra.
+
+Two of Paddle's inference-time conventions are easy to get wrong and are worth naming, because
+both produce plausible-looking output rather than an error. `dropout` is not the identity at
+inference when its `mode` is `downgrade_in_infer` — it scales by `1 - p`, and `p` arrives as an
+input rather than an attribute. And the interpolation operators take their target size three
+ways: an `OutSize` tensor, a `SizeTensor` *list* of rank-0 tensors (which is how a size read
+from another tensor's shape at run time arrives), or a scale; UVDoc uses the list form.
 
 ---
 
