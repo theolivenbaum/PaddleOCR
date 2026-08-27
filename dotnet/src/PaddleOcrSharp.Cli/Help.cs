@@ -53,6 +53,8 @@ public static class Help
             bench options:
               --width <n> --height <n>   Synthetic page size (default: 1024x1024)
               --iterations <n>           Repeats per stage (default: 3)
+              --no-vl                    Skip the vision tower and decoder
+              --no-layout                Skip the layout graph
             """);
 
         return 0;

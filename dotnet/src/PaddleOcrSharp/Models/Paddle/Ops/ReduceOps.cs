@@ -50,6 +50,25 @@ public static class ReduceOps
         PaddleDType dtype = kind == Kind.Any ? PaddleDType.Bool : input.Dtype;
         PaddleTensor result = PaddleTensor.Allocate([.. shape], dtype);
 
+        // When the reduced axes are a contiguous suffix of the shape — which is what
+        // `min(x, axis=[-2, -1])` over a mask stack looks like — every output element owns one
+        // contiguous run of the input, so the whole reduction is a walk of vectorised segments
+        // instead of a per-element index computation.
+        if (IsSuffix(reduced, rank) && input.IsFloat && kind != Kind.Any && input.Count > 0)
+        {
+            int inner = 1;
+            for (int axis = rank - reduced.Count; axis < rank; axis++)
+            {
+                inner *= input.Shape[axis];
+            }
+
+            if (inner > 0)
+            {
+                ReduceSegments(input.FloatSpan, inner, kind, result.FloatSpan);
+                return result;
+            }
+        }
+
         double seed = kind switch
         {
             Kind.Sum or Kind.Any => 0,
@@ -120,6 +139,44 @@ public static class ReduceOps
         }
 
         return result;
+    }
+
+
+    /// <summary>Whether the reduced axes form a contiguous suffix of a rank-<paramref name="rank"/> shape.</summary>
+    private static bool IsSuffix(HashSet<int> reduced, int rank)
+    {
+        for (int axis = rank - reduced.Count; axis < rank; axis++)
+        {
+            if (!reduced.Contains(axis))
+            {
+                return false;
+            }
+        }
+
+        return reduced.Count > 0;
+    }
+
+    /// <summary>Reduces each contiguous run of <paramref name="inner"/> elements to one output.</summary>
+    /// <remarks>
+    /// The accumulation happens in float32, which is both faster and closer to Paddle than the
+    /// double accumulation the general path uses.
+    /// </remarks>
+    private static void ReduceSegments(
+        ReadOnlySpan<float> source,
+        int inner,
+        Kind kind,
+        Span<float> destination)
+    {
+        for (int i = 0; i < destination.Length; i++)
+        {
+            ReadOnlySpan<float> segment = source.Slice(i * inner, inner);
+            destination[i] = kind switch
+            {
+                Kind.Sum => System.Numerics.Tensors.TensorPrimitives.Sum(segment),
+                Kind.Max => System.Numerics.Tensors.TensorPrimitives.Max(segment),
+                _ => System.Numerics.Tensors.TensorPrimitives.Min(segment),
+            };
+        }
     }
 
     /// <summary>

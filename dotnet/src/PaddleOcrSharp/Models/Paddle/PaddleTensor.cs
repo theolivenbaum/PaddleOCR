@@ -48,6 +48,10 @@ public sealed class PaddleTensor
     public Span<float> FloatSpan => (Floats ?? throw new InvalidOperationException(
         $"Tensor of dtype {Dtype} has no float storage.")).AsSpan(0, Count);
 
+    /// <summary>Float storage as memory, for kernels that hand slices to worker threads.</summary>
+    public Memory<float> FloatMemory => (Floats ?? throw new InvalidOperationException(
+        $"Tensor of dtype {Dtype} has no float storage.")).AsMemory(0, Count);
+
     /// <summary>Integer storage as a span.</summary>
     public Span<long> IntSpan => (Ints ?? throw new InvalidOperationException(
         $"Tensor of dtype {Dtype} has no integer storage.")).AsSpan(0, Count);
@@ -164,7 +168,13 @@ public sealed class PaddleTensor
         return new PaddleTensor(Dtype, shape, Floats, Ints) { Count = count };
     }
 
-    /// <summary>Converts to the requested dtype, copying when the storage class changes.</summary>
+    /// <summary>Reinterprets or converts the tensor to <paramref name="dtype"/>.</summary>
+    /// <remarks>
+    /// Two dtypes that share a storage width share the array outright — a cast is very often just
+    /// a relabelling. The conversions that do move data are the ones on the mask head's critical
+    /// path, over tens of millions of elements at a time, so they allocate uninitialised storage
+    /// and convert with <see cref="System.Numerics.Tensors.TensorPrimitives"/> where it applies.
+    /// </remarks>
     public PaddleTensor Cast(PaddleDType dtype)
     {
         if (dtype == Dtype)
@@ -181,24 +191,28 @@ public sealed class PaddleTensor
         {
             if (dtype == PaddleDType.Bool)
             {
-                long[] booleans = new long[Count];
-                for (int i = 0; i < Count; i++)
+                PaddleTensor booleans = Int(Shape, dtype);
+                ReadOnlySpan<long> source = IntSpan;
+                Span<long> destination = booleans.IntSpan;
+                for (int i = 0; i < source.Length; i++)
                 {
-                    booleans[i] = Ints![i] != 0 ? 1 : 0;
+                    destination[i] = source[i] != 0 ? 1 : 0;
                 }
 
-                return FromInts(booleans, Shape, dtype);
+                return booleans;
             }
 
             if (dtype == PaddleDType.Int32)
             {
-                long[] narrowed = new long[Count];
-                for (int i = 0; i < Count; i++)
+                PaddleTensor narrowed = Int(Shape, dtype);
+                ReadOnlySpan<long> source = IntSpan;
+                Span<long> destination = narrowed.IntSpan;
+                for (int i = 0; i < source.Length; i++)
                 {
-                    narrowed[i] = (int)Ints![i];
+                    destination[i] = (int)source[i];
                 }
 
-                return FromInts(narrowed, Shape, dtype);
+                return narrowed;
             }
 
             return new PaddleTensor(dtype, Shape, null, Ints);
@@ -206,24 +220,37 @@ public sealed class PaddleTensor
 
         if (dtype.IsFloat())
         {
-            float[] values = new float[Count];
-            for (int i = 0; i < Count; i++)
+            PaddleTensor floats = Float(Shape, dtype);
+            ReadOnlySpan<long> source = IntSpan;
+            Span<float> destination = floats.FloatSpan;
+            for (int i = 0; i < source.Length; i++)
             {
-                values[i] = Ints![i];
+                destination[i] = source[i];
             }
 
-            return FromFloats(values, Shape, dtype);
+            return floats;
         }
 
-        long[] integers = new long[Count];
-        for (int i = 0; i < Count; i++)
+        PaddleTensor integers = Int(Shape, dtype);
+        ReadOnlySpan<float> values = FloatSpan;
+        Span<long> results = integers.IntSpan;
+
+        if (dtype == PaddleDType.Bool)
         {
-            integers[i] = dtype == PaddleDType.Bool
-                ? (Floats![i] != 0f ? 1 : 0)
-                : (long)Floats![i];
+            for (int i = 0; i < values.Length; i++)
+            {
+                results[i] = values[i] != 0f ? 1 : 0;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                results[i] = (long)values[i];
+            }
         }
 
-        return FromInts(integers, Shape, dtype);
+        return integers;
     }
 
     /// <summary>Deep copy.</summary>

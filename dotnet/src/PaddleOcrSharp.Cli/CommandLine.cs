@@ -72,9 +72,19 @@ public sealed class CommandLine
     public float GetFloat(string name, float fallback) =>
         _options.TryGetValue(name, out string? value) && float.TryParse(value, out float parsed) ? parsed : fallback;
 
-    /// <summary>Option value parsed as a boolean; a bare flag counts as <see langword="true"/>.</summary>
-    public bool GetBool(string name, bool fallback) =>
-        _options.TryGetValue(name, out string? value)
-            ? value is "true" or "1" or "yes"
-            : fallback;
+    /// <summary>
+    /// Option value parsed as a boolean; a bare flag counts as <see langword="true"/>, and
+    /// <c>--no-name</c> turns a default-on switch off.
+    /// </summary>
+    public bool GetBool(string name, bool fallback)
+    {
+        if (_options.TryGetValue(name, out string? value))
+        {
+            return IsTrue(value);
+        }
+
+        return _options.TryGetValue("no-" + name, out string? negated) ? !IsTrue(negated) : fallback;
+    }
+
+    private static bool IsTrue(string value) => value is "true" or "1" or "yes" or "on";
 }

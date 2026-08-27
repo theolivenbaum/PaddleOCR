@@ -35,7 +35,7 @@ public static class ParseCommand
             cancellation.Cancel();
         };
 
-        bool useLayout = command.GetBool("layout", !command.Has("no-layout"));
+        bool useLayout = command.GetBool("layout", true);
 
         string modelDirectory = await ModelLocator
             .ResolveVLAsync(command, allowDownload: true, cancellation.Token)

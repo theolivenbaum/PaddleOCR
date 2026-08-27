@@ -106,7 +106,13 @@ public sealed class PirInterpreter : IDisposable
                     exception);
             }
 
-            profile?.Add(operation.Name, System.Diagnostics.Stopwatch.GetElapsedTime(started));
+            if (profile is not null)
+            {
+                profile.Add(
+                    operation.Name,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                    () => Describe(operation, values));
+            }
             trace?.Record(index, operation, operation.Outputs.Select(id => id > 0 ? values[id] : null).ToArray());
 
             foreach (int id in operation.Inputs)
@@ -876,6 +882,23 @@ public sealed class PirInterpreter : IDisposable
     private static long[] ToLongArray(PaddleTensor tensor) =>
         [.. Enumerable.Range(0, tensor.Count).Select(tensor.GetLong)];
 
+    /// <summary>Describes an operation's first result, for the profiler's slowest-call column.</summary>
+    private static string Describe(PirOperation operation, object?[] values)
+    {
+        object? result = operation.Outputs.Length > 0 && operation.Outputs[0] > 0
+            ? values[operation.Outputs[0]]
+            : null;
+
+        string shape = result switch
+        {
+            PaddleTensor tensor => tensor.ToString(),
+            PaddleTensor[] list => $"[{list.Length} tensors]",
+            _ => "-",
+        };
+
+        return $"{shape} {operation.StructName}";
+    }
+
     private static PaddleTensor Fill(int[] shape, double value, PaddleDType dtype)
     {
         PaddleTensor result = PaddleTensor.Allocate(shape, dtype);
@@ -947,13 +970,28 @@ public sealed class PirInterpreter : IDisposable
 /// </summary>
 public sealed class PirProfile
 {
-    private readonly Dictionary<string, (TimeSpan Elapsed, int Count)> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
     /// <summary>Records one operator's execution.</summary>
-    public void Add(string name, TimeSpan elapsed)
+    /// <param name="name">The operator's name.</param>
+    /// <param name="elapsed">How long the call took.</param>
+    /// <param name="describe">
+    /// Describes the call's result. Invoked only when this call is the slowest seen for
+    /// <paramref name="name"/>, so a profiled run does not pay to describe every operation.
+    /// </param>
+    public void Add(string name, TimeSpan elapsed, Func<string>? describe = null)
     {
-        _entries.TryGetValue(name, out (TimeSpan Elapsed, int Count) entry);
-        _entries[name] = (entry.Elapsed + elapsed, entry.Count + 1);
+        ref Entry entry = ref System.Runtime.InteropServices.CollectionsMarshal
+            .GetValueRefOrAddDefault(_entries, name, out _);
+
+        entry.Elapsed += elapsed;
+        entry.Count++;
+
+        if (elapsed > entry.Slowest)
+        {
+            entry.Slowest = elapsed;
+            entry.SlowestDetail = describe?.Invoke();
+        }
     }
 
     /// <summary>Per-operator totals, slowest first.</summary>
@@ -969,15 +1007,27 @@ public sealed class PirProfile
     {
         var builder = new System.Text.StringBuilder();
         TimeSpan total = Total;
-        builder.AppendLine($"{"operator",-24}{"total",10}{"calls",8}{"share",8}");
+        builder.AppendLine($"{"operator",-20}{"total",10}{"calls",7}{"share",8}{"slowest",10}  worst call");
+
         foreach ((string name, TimeSpan elapsed, int count) in ByCost().Take(top))
         {
+            Entry entry = _entries[name];
             double share = total > TimeSpan.Zero ? elapsed / total : 0;
-            builder.AppendLine($"{name,-24}{elapsed.TotalMilliseconds,9:F0}ms{count,8}{share,7:P1}");
+            builder.AppendLine(
+                $"{name,-20}{elapsed.TotalMilliseconds,9:F0}ms{count,7}{share,7:P1}" +
+                $"{entry.Slowest.TotalMilliseconds,9:F0}ms  {entry.SlowestDetail}");
         }
 
-        builder.AppendLine($"{"total",-24}{total.TotalMilliseconds,9:F0}ms");
+        builder.AppendLine($"{"total",-20}{total.TotalMilliseconds,9:F0}ms");
         return builder.ToString();
+    }
+
+    private struct Entry
+    {
+        public TimeSpan Elapsed;
+        public int Count;
+        public TimeSpan Slowest;
+        public string? SlowestDetail;
     }
 }
 

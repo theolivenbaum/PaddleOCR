@@ -88,6 +88,25 @@ public static class Broadcast
     {
         int[] shape = ResultShape(left.Shape, right.Shape);
         PaddleTensor result = PaddleTensor.Int(shape, PaddleDType.Bool);
+        int count = result.Count;
+
+        // Comparing a whole feature map against a threshold is the shape that actually shows up
+        // (a mask logit against zero, over twelve million elements), so it skips the per-element
+        // delegate and the double conversion behind it.
+        if (left.IsFloat && right.IsFloat && right.Count == 1 && left.Count == count)
+        {
+            ReadOnlySpan<float> source = left.FloatSpan;
+            Span<long> destination = result.IntSpan;
+            float threshold = right.FloatSpan[0];
+
+            for (int i = 0; i < count; i++)
+            {
+                destination[i] = predicate(source[i], threshold) ? 1 : 0;
+            }
+
+            return result;
+        }
+
         Iterate(left, right, shape, (index, l, r) => result.Ints![index] = predicate(l, r) ? 1 : 0);
         return result;
     }

@@ -82,47 +82,47 @@ public static class ConvOps
                 int outputBase = ((n * outChannels) + (g * outGroupChannels)) * outHeight * outWidth;
                 int weightBase = g * outGroupChannels * patch;
 
-                Parallel.For(0, outHeight, () => TensorPool.Rent(outWidth * patch), (oy, _, column) =>
+                // Each output row is one GEMM: the filters (outGroupChannels x patch) against the
+                // row's im2col columns, which are stored outWidth x patch and so play the part of
+                // a transposed right-hand operand. Doing it a column at a time instead would
+                // stream the whole filter matrix past for every output pixel.
+                int tileCount = outGroupChannels * outWidth;
+                int columnCount = outWidth * patch;
+
+                Parallel.For(0, outHeight, () => TensorPool.Rent(columnCount + tileCount), (oy, _, scratch) =>
                 {
-                    Span<float> columns = column.Span;
+                    Span<float> columns = scratch.Span[..columnCount];
                     Im2ColRow(
                         input.Floats!, inputBase, inGroupChannels, inHeight, inWidth,
                         kernelHeight, kernelWidth, strides, dilations, padTop, padLeft,
                         oy, outWidth, columns);
 
-                    // One column at a time, four filters at a time: the column stays in L1 while
-                    // the filters stream past.
-                    ReadOnlySpan<float> filters = weightArray.AsSpan(weightBase, outGroupChannels * patch);
+                    Gemm.MatMul(
+                        weightArray.AsMemory(weightBase, outGroupChannels * patch),
+                        outGroupChannels,
+                        patch,
+                        transposeA: false,
+                        scratch.Memory[..columnCount],
+                        outWidth,
+                        transposeB: true,
+                        scratch.Memory.Slice(columnCount, tileCount),
+                        allowParallel: false);
+
+                    // The product is channel-major; the output plane is too, but with the whole
+                    // feature map between consecutive channels.
+                    Span<float> tile = scratch.Span.Slice(columnCount, tileCount);
                     int planeStride = outHeight * outWidth;
                     int rowOffset = outputBase + (oy * outWidth);
 
-                    for (int ox = 0; ox < outWidth; ox++)
+                    for (int oc = 0; oc < outGroupChannels; oc++)
                     {
-                        ReadOnlySpan<float> patchColumn = columns.Slice(ox * patch, patch);
-                        int oc = 0;
-
-                        for (; oc <= outGroupChannels - 4; oc += 4)
-                        {
-                            Gemm.Dot4(
-                                patchColumn, filters, oc * patch, patch,
-                                out float a0, out float a1, out float a2, out float a3);
-
-                            result.Floats![rowOffset + (oc * planeStride) + ox] = a0;
-                            result.Floats![rowOffset + ((oc + 1) * planeStride) + ox] = a1;
-                            result.Floats![rowOffset + ((oc + 2) * planeStride) + ox] = a2;
-                            result.Floats![rowOffset + ((oc + 3) * planeStride) + ox] = a3;
-                        }
-
-                        for (; oc < outGroupChannels; oc++)
-                        {
-                            result.Floats![rowOffset + (oc * planeStride) + ox] =
-                                Gemm.Dot(patchColumn, filters.Slice(oc * patch, patch));
-                        }
+                        tile.Slice(oc * outWidth, outWidth)
+                            .CopyTo(result.Floats.AsSpan(rowOffset + (oc * planeStride), outWidth));
                     }
 
-                    return column;
+                    return scratch;
                 },
-                column => column.Dispose());
+                scratch => scratch.Dispose());
             }
         }
 

@@ -18,6 +18,55 @@ public static class Kernels
         TensorPrimitives.Add(destination, source[..destination.Length], destination);
 
     /// <summary><c>destination += source · scale</c>.</summary>
+    /// <summary>
+    /// Adds <paramref name="source"/>, scaled four different ways, into four destinations.
+    /// </summary>
+    /// <remarks>
+    /// The point is the single load of <paramref name="source"/>: a GEMM inner loop that updates
+    /// four output rows against one row of the right-hand matrix gets four multiply-adds per
+    /// loaded element instead of one, which is what turns it from load-bound into compute-bound.
+    /// </remarks>
+    public static void AddScaled4(
+        Span<float> d0,
+        Span<float> d1,
+        Span<float> d2,
+        Span<float> d3,
+        ReadOnlySpan<float> source,
+        float s0,
+        float s1,
+        float s2,
+        float s3)
+    {
+        int length = source.Length;
+        int i = 0;
+
+        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        {
+            Vector256<float> v0 = Vector256.Create(s0);
+            Vector256<float> v1 = Vector256.Create(s1);
+            Vector256<float> v2 = Vector256.Create(s2);
+            Vector256<float> v3 = Vector256.Create(s3);
+
+            for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
+            {
+                Vector256<float> x = Vector256.LoadUnsafe(in source[i]);
+                Vector256.FusedMultiplyAdd(x, v0, Vector256.LoadUnsafe(in d0[i])).StoreUnsafe(ref d0[i]);
+                Vector256.FusedMultiplyAdd(x, v1, Vector256.LoadUnsafe(in d1[i])).StoreUnsafe(ref d1[i]);
+                Vector256.FusedMultiplyAdd(x, v2, Vector256.LoadUnsafe(in d2[i])).StoreUnsafe(ref d2[i]);
+                Vector256.FusedMultiplyAdd(x, v3, Vector256.LoadUnsafe(in d3[i])).StoreUnsafe(ref d3[i]);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            float x = source[i];
+            d0[i] += x * s0;
+            d1[i] += x * s1;
+            d2[i] += x * s2;
+            d3[i] += x * s3;
+        }
+    }
+
     public static void AddScaled(Span<float> destination, ReadOnlySpan<float> source, float scale)
     {
         int length = destination.Length;

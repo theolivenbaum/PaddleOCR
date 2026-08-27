@@ -16,18 +16,36 @@ public static class BenchCommand
         int width = command.GetInt("width", 1024);
         int height = command.GetInt("height", 1024);
         int iterations = Math.Max(1, command.GetInt("iterations", 3));
-
-        string directory = await ModelLocator
-            .ResolveVLAsync(command, allowDownload: true)
-            .ConfigureAwait(false);
+        bool benchmarkVL = command.GetBool("vl", true);
 
         Console.WriteLine($"Threads: {Environment.ProcessorCount}  Vector512: {System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}");
 
         var clock = Stopwatch.StartNew();
+        using RgbImage source = Synthetic(width, height);
+
+        if (benchmarkVL)
+        {
+            await BenchmarkVLAsync(command, source, iterations).ConfigureAwait(false);
+        }
+
+        if (command.GetBool("layout", true))
+        {
+            await BenchmarkLayoutAsync(command, source, iterations).ConfigureAwait(false);
+        }
+
+        return 0;
+    }
+
+    /// <summary>Times the vision tower and the decoder.</summary>
+    private static async Task BenchmarkVLAsync(CommandLine command, RgbImage source, int iterations)
+    {
+        string directory = await ModelLocator
+            .ResolveVLAsync(command, allowDownload: true)
+            .ConfigureAwait(false);
+
+        var clock = Stopwatch.StartNew();
         using PaddleOcrVLModel model = PaddleOcrVLModel.Load(directory);
         Console.WriteLine($"Load: {clock.Elapsed.TotalSeconds:F2}s");
-
-        using RgbImage source = Synthetic(width, height);
 
         clock.Restart();
         using PreprocessedImage preprocessed = VisionPreprocessor.Preprocess(
@@ -71,12 +89,6 @@ public static class BenchCommand
                 $"{generated.Count} tokens ({allocated / (1024.0 * 1024.0):F1} MiB allocated)");
         }
 
-        if (command.GetBool("layout", true))
-        {
-            await BenchmarkLayoutAsync(command, source, iterations).ConfigureAwait(false);
-        }
-
-        return 0;
     }
 
     /// <summary>Times the layout graph and reports which operators dominate it.</summary>

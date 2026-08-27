@@ -41,9 +41,9 @@ public static class LinearOps
         int yMatrix = yShape[^2] * yShape[^1];
         int outMatrix = xRows * yCols;
 
-        ReadOnlySpan<float> xData = x.FloatSpan;
-        ReadOnlySpan<float> yData = y.FloatSpan;
-        Span<float> output = result.FloatSpan;
+        ReadOnlyMemory<float> xData = x.FloatMemory;
+        ReadOnlyMemory<float> yData = y.FloatMemory;
+        Memory<float> output = result.FloatMemory;
 
         int[] counters = new int[batchShape.Length];
         for (int b = 0; b < batches; b++)
@@ -56,16 +56,15 @@ public static class LinearOps
                 yOffset += counters[axis] * yBatchStrides[axis];
             }
 
-            MultiplyOne(
+            Gemm.MatMul(
                 xData.Slice(xOffset * xMatrix, xMatrix),
-                yData.Slice(yOffset * yMatrix, yMatrix),
-                output.Slice(b * outMatrix, outMatrix),
-                xShape[^2],
-                xShape[^1],
-                yShape[^2],
-                yShape[^1],
+                xRows,
+                xCols,
                 transposeX,
-                transposeY);
+                yData.Slice(yOffset * yMatrix, yMatrix),
+                yCols,
+                transposeY,
+                output.Slice(b * outMatrix, outMatrix));
 
             for (int axis = batchShape.Length - 1; axis >= 0; axis--)
             {
@@ -99,49 +98,6 @@ public static class LinearOps
         }
 
         return result;
-    }
-
-    private static void MultiplyOne(
-        ReadOnlySpan<float> a,
-        ReadOnlySpan<float> b,
-        Span<float> destination,
-        int aRows,
-        int aCols,
-        int bRows,
-        int bCols,
-        bool transposeA,
-        bool transposeB)
-    {
-        int m = transposeA ? aCols : aRows;
-        int k = transposeA ? aRows : aCols;
-        int n = transposeB ? bRows : bCols;
-
-        destination.Clear();
-
-        for (int i = 0; i < m; i++)
-        {
-            Span<float> row = destination.Slice(i * n, n);
-            for (int p = 0; p < k; p++)
-            {
-                float value = transposeA ? a[(p * aCols) + i] : a[(i * aCols) + p];
-                if (value == 0f)
-                {
-                    continue;
-                }
-
-                if (transposeB)
-                {
-                    for (int j = 0; j < n; j++)
-                    {
-                        row[j] += value * b[(j * bCols) + p];
-                    }
-                }
-                else
-                {
-                    Kernels.AddScaled(row, b.Slice(p * bCols, n), value);
-                }
-            }
-        }
     }
 
     /// <summary>Batched matrix product without transposes, matching <c>pd_op.bmm</c>.</summary>

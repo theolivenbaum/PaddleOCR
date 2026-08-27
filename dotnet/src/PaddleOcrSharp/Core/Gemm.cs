@@ -412,28 +412,220 @@ public static class Gemm
     }
 
     /// <summary>
-    /// Computes <c>y[m, n] = Σ_k a[m, k] · b[k, n]</c> for two dense float32 matrices, i.e. the
-    /// non-transposed product used by attention (<c>probs · V</c>).
+    /// Computes <c>y[m, n] = Σ_k a[m, k] · b[k, n]</c> for two dense float32 matrices, with
+    /// either operand optionally stored transposed.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The layout decides the kernel. When the right-hand matrix is stored transposed its rows
+    /// are the reduction vectors, so each output element is a dot product of two contiguous runs
+    /// and <see cref="Dot4"/> applies; otherwise the reduction walks down its columns, so the
+    /// loop instead accumulates whole output rows with <see cref="Kernels.AddScaled4"/>. Both
+    /// keep four streams in flight, which is what makes the inner loop compute-bound.
+    /// </para>
+    /// <para>
+    /// The output is tiled and the tiles run in parallel above a work threshold. Tiling over
+    /// both axes rather than rows alone matters because the shapes here are often lopsided — a
+    /// deformable-attention product is 13 125 rows by 256 columns, a mask product 300 by 40 000.
+    /// </para>
+    /// </remarks>
+    /// <param name="a">The left matrix, <c>m × k</c> row-major, or <c>k × m</c> when transposed.</param>
+    /// <param name="m">Rows of the product.</param>
+    /// <param name="k">The reduction length.</param>
+    /// <param name="transposeA">Whether <paramref name="a"/> is stored transposed.</param>
+    /// <param name="b">The right matrix, <c>k × n</c> row-major, or <c>n × k</c> when transposed.</param>
+    /// <param name="n">Columns of the product.</param>
+    /// <param name="transposeB">Whether <paramref name="b"/> is stored transposed.</param>
+    /// <param name="y">The <c>m × n</c> product, written in full.</param>
+    /// <param name="allowParallel">
+    /// Whether the tiles may run in parallel. Callers that are already inside a parallel loop —
+    /// the convolution, which threads over output rows — pass <see langword="false"/> rather than
+    /// nesting a second level of parallelism inside each of their own work items.
+    /// </param>
     public static void MatMul(
+        ReadOnlyMemory<float> a,
+        int m,
+        int k,
+        bool transposeA,
+        ReadOnlyMemory<float> b,
+        int n,
+        bool transposeB,
+        Memory<float> y,
+        bool allowParallel = true)
+    {
+        if (m == 0 || n == 0)
+        {
+            return;
+        }
+
+        if (k == 0)
+        {
+            y.Span[..(m * n)].Clear();
+            return;
+        }
+
+        // Every kernel below reads the left matrix a row at a time, so a transposed one is
+        // materialised once rather than gathered on every pass.
+        using PooledBuffer transposed = transposeA ? TensorPool.Rent(m * k) : default;
+        ReadOnlyMemory<float> left = a;
+
+        if (transposeA)
+        {
+            Transpose(a.Span, k, m, transposed.Span);
+            left = transposed.Memory;
+        }
+
+        // A column tile of the right-hand matrix should stay resident across the reduction.
+        int columnBlock = transposeB ? 64 : Math.Min(n, Math.Max(64, (1 << 15) / Math.Max(1, k)));
+        int rowBlock = 64;
+
+        int rowTiles = ((m - 1) / rowBlock) + 1;
+        int columnTiles = ((n - 1) / columnBlock) + 1;
+        int tiles = rowTiles * columnTiles;
+
+        void RunTile(int tile)
+        {
+            int row = (tile / columnTiles) * rowBlock;
+            int column = (tile % columnTiles) * columnBlock;
+            int rows = Math.Min(rowBlock, m - row);
+            int columns = Math.Min(columnBlock, n - column);
+
+            if (transposeB)
+            {
+                TransposedTile(left.Span, b.Span, y.Span, k, n, row, rows, column, columns);
+            }
+            else
+            {
+                DirectTile(left.Span, b.Span, y.Span, k, n, row, rows, column, columns);
+            }
+        }
+
+        if (allowParallel && tiles > 1 && (long)m * k * n >= ParallelThreshold)
+        {
+            Parallel.For(0, tiles, RunTile);
+        }
+        else
+        {
+            for (int tile = 0; tile < tiles; tile++)
+            {
+                RunTile(tile);
+            }
+        }
+    }
+
+    /// <summary>One output tile when the right-hand matrix is stored <c>n × k</c>.</summary>
+    private static void TransposedTile(
         ReadOnlySpan<float> a,
-        int rows,
-        int inner,
         ReadOnlySpan<float> b,
         Span<float> y,
-        int cols)
+        int k,
+        int n,
+        int row,
+        int rows,
+        int column,
+        int columns)
     {
-        for (int m = 0; m < rows; m++)
+        for (int i = 0; i < rows; i++)
         {
-            Span<float> yr = y.Slice(m * cols, cols);
-            yr.Clear();
-            ReadOnlySpan<float> ar = a.Slice(m * inner, inner);
-            for (int k = 0; k < inner; k++)
+            ReadOnlySpan<float> left = a.Slice((row + i) * k, k);
+            Span<float> destination = y.Slice(((row + i) * n) + column, columns);
+
+            int j = 0;
+            for (; j <= columns - 4; j += 4)
             {
-                float scale = ar[k];
+                Dot4(left, b, ((column + j) * k) + 0, k, out float a0, out float a1, out float a2, out float a3);
+                destination[j] = a0;
+                destination[j + 1] = a1;
+                destination[j + 2] = a2;
+                destination[j + 3] = a3;
+            }
+
+            for (; j < columns; j++)
+            {
+                destination[j] = Dot(left, b.Slice((column + j) * k, k));
+            }
+        }
+    }
+
+    /// <summary>One output tile when the right-hand matrix is stored <c>k × n</c>.</summary>
+    private static void DirectTile(
+        ReadOnlySpan<float> a,
+        ReadOnlySpan<float> b,
+        Span<float> y,
+        int k,
+        int n,
+        int row,
+        int rows,
+        int column,
+        int columns)
+    {
+        int i = 0;
+        for (; i <= rows - 4; i += 4)
+        {
+            Span<float> d0 = y.Slice(((row + i) * n) + column, columns);
+            Span<float> d1 = y.Slice(((row + i + 1) * n) + column, columns);
+            Span<float> d2 = y.Slice(((row + i + 2) * n) + column, columns);
+            Span<float> d3 = y.Slice(((row + i + 3) * n) + column, columns);
+
+            d0.Clear();
+            d1.Clear();
+            d2.Clear();
+            d3.Clear();
+
+            int base0 = (row + i) * k;
+
+            for (int p = 0; p < k; p++)
+            {
+                float s0 = a[base0 + p];
+                float s1 = a[base0 + k + p];
+                float s2 = a[base0 + (2 * k) + p];
+                float s3 = a[base0 + (3 * k) + p];
+
+                // Masks and attention weights are genuinely sparse; skipping a whole quad of
+                // zeros is worth the four compares.
+                if ((s0, s1, s2, s3) == (0f, 0f, 0f, 0f))
+                {
+                    continue;
+                }
+
+                Kernels.AddScaled4(d0, d1, d2, d3, b.Slice((p * n) + column, columns), s0, s1, s2, s3);
+            }
+        }
+
+        for (; i < rows; i++)
+        {
+            Span<float> destination = y.Slice(((row + i) * n) + column, columns);
+            destination.Clear();
+
+            int offset = (row + i) * k;
+            for (int p = 0; p < k; p++)
+            {
+                float scale = a[offset + p];
                 if (scale != 0f)
                 {
-                    Kernels.AddScaled(yr, b.Slice(k * cols, cols), scale);
+                    Kernels.AddScaled(destination, b.Slice((p * n) + column, columns), scale);
+                }
+            }
+        }
+    }
+
+    /// <summary>Transposes a <paramref name="rows"/> × <paramref name="columns"/> matrix.</summary>
+    private static void Transpose(ReadOnlySpan<float> source, int rows, int columns, Span<float> destination)
+    {
+        const int Block = 32;
+
+        for (int i0 = 0; i0 < rows; i0 += Block)
+        {
+            int iEnd = Math.Min(i0 + Block, rows);
+            for (int j0 = 0; j0 < columns; j0 += Block)
+            {
+                int jEnd = Math.Min(j0 + Block, columns);
+                for (int i = i0; i < iEnd; i++)
+                {
+                    for (int j = j0; j < jEnd; j++)
+                    {
+                        destination[(j * rows) + i] = source[(i * columns) + j];
+                    }
                 }
             }
         }

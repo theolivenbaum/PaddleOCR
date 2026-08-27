@@ -86,34 +86,57 @@ public class GemmTests
         TensorAssert.Close(expected, actual, absoluteTolerance: 1e-4, relativeTolerance: 1e-4);
     }
 
-    [Fact]
-    public void MatMulMatchesReference()
+    // Small shapes exercise the tile remainders; the large one crosses the parallel threshold and
+    // spans several tiles on both axes.
+    [Theory]
+    [InlineData(13, 29, 17, false, false)]
+    [InlineData(13, 29, 17, true, false)]
+    [InlineData(13, 29, 17, false, true)]
+    [InlineData(13, 29, 17, true, true)]
+    [InlineData(1, 64, 96, false, false)]
+    [InlineData(96, 1, 3, false, true)]
+    [InlineData(200, 137, 208, false, false)]
+    [InlineData(200, 137, 208, false, true)]
+    public void MatMulMatchesReference(int rows, int inner, int cols, bool transposeA, bool transposeB)
     {
-        const int Rows = 13;
-        const int Inner = 29;
-        const int Cols = 17;
+        float[] a = Random(rows * inner, seed: 1);
+        float[] b = Random(inner * cols, seed: 2);
 
-        float[] a = Random(Rows * Inner, seed: 1);
-        float[] b = Random(Inner * Cols, seed: 2);
-
-        float[] expected = new float[Rows * Cols];
-        for (int m = 0; m < Rows; m++)
+        float[] expected = new float[rows * cols];
+        for (int m = 0; m < rows; m++)
         {
-            for (int n = 0; n < Cols; n++)
+            for (int n = 0; n < cols; n++)
             {
                 double sum = 0;
-                for (int k = 0; k < Inner; k++)
+                for (int k = 0; k < inner; k++)
                 {
-                    sum += (double)a[(m * Inner) + k] * b[(k * Cols) + n];
+                    sum += (double)a[(m * inner) + k] * b[(k * cols) + n];
                 }
 
-                expected[(m * Cols) + n] = (float)sum;
+                expected[(m * cols) + n] = (float)sum;
             }
         }
 
-        float[] actual = new float[Rows * Cols];
-        Gemm.MatMul(a, Rows, Inner, b, actual, Cols);
+        float[] left = transposeA ? Transposed(a, rows, inner) : a;
+        float[] right = transposeB ? Transposed(b, inner, cols) : b;
+
+        float[] actual = new float[rows * cols];
+        Gemm.MatMul(left, rows, inner, transposeA, right, cols, transposeB, actual);
 
         TensorAssert.Close(expected, actual, absoluteTolerance: 1e-5, relativeTolerance: 1e-5);
+    }
+
+    private static float[] Transposed(float[] values, int rows, int columns)
+    {
+        float[] result = new float[values.Length];
+        for (int i = 0; i < rows; i++)
+        {
+            for (int j = 0; j < columns; j++)
+            {
+                result[(j * rows) + i] = values[(i * columns) + j];
+            }
+        }
+
+        return result;
     }
 }
