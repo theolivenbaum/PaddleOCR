@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PaddleOcrSharp</RootNamespace>
+    <AssemblyName>PaddleOcrSharp</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>PaddleOcrSharp</PackageId>
+    <!-- Runs the trim and AOT analysers on every build, so a reflection-based API cannot creep
+         in unnoticed: the CLI publishes with native AOT and must keep doing so. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <!-- Also turns on CS1591, so an undocumented public member fails review by warning rather
+         than by nobody noticing. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The parity tests drive a few post-processing stages directly; they are internal because
+         they are not a contract, not because they are untested. -->
+    <InternalsVisibleTo Include="PaddleOcrSharp.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" Version="3.119.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.0" />
+    <PackageReference Include="System.Numerics.Tensors" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

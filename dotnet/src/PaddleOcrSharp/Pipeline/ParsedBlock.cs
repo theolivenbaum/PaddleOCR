@@ -1,0 +1,106 @@
+using PaddleOcrSharp.Models.Layout;
+
+namespace PaddleOcrSharp.Pipeline;
+
+/// <summary>One recognised region of a page.</summary>
+/// <param name="Label">Layout label of the region.</param>
+/// <param name="Box">The region's bounding box.</param>
+/// <param name="Content">Recognised content: text, LaTeX, or an HTML table.</param>
+/// <param name="ReadingOrder">Position in the page's reading order.</param>
+public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, int ReadingOrder)
+{
+    /// <summary>
+    /// The block's position in the page's reading flow, counting from one, or
+    /// <see langword="null"/> when the label is one that does not take part.
+    /// </summary>
+    /// <remarks>
+    /// <c>update_order_index</c>. Distinct from <see cref="ReadingOrder"/>, which is the raw
+    /// value the detector's ordering head predicted and is only meaningful as a sort key.
+    /// </remarks>
+    public int? Order { get; init; }
+
+    /// <summary>
+    /// Identifies the blocks that were considered together before recognition, or
+    /// <see langword="null"/> for a block the merger never looked at.
+    /// </summary>
+    /// <remarks>
+    /// <c>group_id</c>: the index of the group's first block, carried by every member, so a
+    /// consumer can tell that a paragraph split across two columns is one paragraph. A text
+    /// block that came out of the merger alone still gets one; a figure, a table, or a run the
+    /// aspect-ratio guard abandoned does not.
+    /// </remarks>
+    public int? GroupId { get; init; }
+
+    /// <summary>
+    /// How deep the heading sits in the document's structure, once
+    /// <see cref="ParsedDocument.AssignTitleLevels"/> has worked it out.
+    /// </summary>
+    /// <remarks>
+    /// <c>title_level</c>. Only <c>paragraph_title</c> blocks get one, and only after the whole
+    /// document is in hand; the markdown falls back to reading the heading's own numbering when
+    /// it is absent.
+    /// </remarks>
+    public int? TitleLevel { get; init; }
+
+    /// <summary>Encoded image bytes when the block is a figure kept as an image.</summary>
+    public byte[]? Image { get; init; }
+
+    /// <summary>Suggested file name for <see cref="Image"/>.</summary>
+    public string? ImagePath { get; init; }
+
+    /// <summary>
+    /// Text runs with their quadrilaterals, populated only for blocks recognised in spotting mode.
+    /// </summary>
+    public IReadOnlyList<SpottedText> SpottedText { get; init; } = [];
+}
+
+/// <summary>The parse of a single page.</summary>
+/// <param name="Index">Zero-based page index within the document.</param>
+/// <param name="Width">Page width in pixels.</param>
+/// <param name="Height">Page height in pixels.</param>
+/// <param name="Blocks">Recognised regions, in reading order.</param>
+public sealed record ParsedPage(int Index, int Width, int Height, IReadOnlyList<ParsedBlock> Blocks)
+{
+    /// <summary>Renders the page as markdown.</summary>
+    /// <param name="options">Formatting options; defaults to the shipped pipeline's.</param>
+    public string ToMarkdown(MarkdownOptions? options = null) =>
+        MarkdownWriter.Write(Blocks, options ?? MarkdownOptions.Default, Width);
+}
+
+/// <summary>A parsed document: one or more pages.</summary>
+/// <param name="Pages">The pages, in order.</param>
+public sealed record ParsedDocument(IReadOnlyList<ParsedPage> Pages)
+{
+    /// <summary>
+    /// Rejoins tables that a page break split in two.
+    /// </summary>
+    /// <remarks>
+    /// <c>restructure_pages(merge_tables=True)</c>, which upstream leaves to the caller rather
+    /// than applying to every parse — a table split across pages is only recognisable once the
+    /// whole document is in hand.
+    /// </remarks>
+    public ParsedDocument MergeTablesAcrossPages() => this with { Pages = TableMerger.Apply(Pages) };
+
+    /// <summary>
+    /// Works out how deep each heading sits in the document's structure.
+    /// </summary>
+    /// <remarks>
+    /// <c>restructure_pages(relevel_titles=True)</c>. Like table merging it needs the whole
+    /// document: a heading's depth is decided partly by how its size compares with every other
+    /// heading's.
+    /// </remarks>
+    public ParsedDocument AssignTitleLevels() => this with { Pages = TitleLevels.Apply(Pages) };
+
+    /// <summary>
+    /// Renders the whole document as markdown.
+    /// </summary>
+    /// <remarks>
+    /// Pages are joined by a blank line, as <c>concatenate_markdown_pages</c> does, except that
+    /// upstream also puts one before the first page. Pass a <paramref name="separator"/> to put a
+    /// rule or a heading between pages instead.
+    /// </remarks>
+    /// <param name="options">Formatting options; defaults to the shipped pipeline's.</param>
+    /// <param name="separator">What goes between consecutive pages.</param>
+    public string ToMarkdown(MarkdownOptions? options = null, string separator = "\n\n") =>
+        string.Join(separator, Pages.Select(page => page.ToMarkdown(options)));
+}
