@@ -12,7 +12,7 @@ namespace PaddleOcrSharp.Models.Paddle.Ops;
 /// trailing-dimension broadcast — get dedicated kernels and everything else falls back to the
 /// generic broadcast walk.
 /// </remarks>
-public static class ElementwiseOps
+internal static class ElementwiseOps
 {
     /// <summary>Which binary operation to apply.</summary>
     public enum Binary

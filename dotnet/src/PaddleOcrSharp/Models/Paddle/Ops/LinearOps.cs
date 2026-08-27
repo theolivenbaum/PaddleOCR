@@ -4,7 +4,7 @@ using PaddleOcrSharp.Formats.Paddle;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Matrix products, normalisations and softmax.</summary>
-public static class LinearOps
+internal static class LinearOps
 {
     /// <summary>
     /// Batched matrix product with optional transposes, matching <c>pd_op.matmul</c>.

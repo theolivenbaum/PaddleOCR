@@ -102,6 +102,7 @@ public static class PilResize
     /// </summary>
     /// <param name="inSize">Source extent along the axis.</param>
     /// <param name="outSize">Destination extent along the axis.</param>
+    /// <param name="filter">Which reconstruction filter to sample.</param>
     /// <param name="bounds">Receives <c>(min, count)</c> pairs, two ints per output pixel.</param>
     /// <param name="coefficients">Receives <c>outSize × kernelSize</c> Q22 coefficients.</param>
     /// <returns>The kernel size (taps per output pixel).</returns>

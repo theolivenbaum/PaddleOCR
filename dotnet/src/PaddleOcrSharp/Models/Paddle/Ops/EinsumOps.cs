@@ -7,7 +7,7 @@ namespace PaddleOcrSharp.Models.Paddle.Ops;
 /// Explicit output notation (<c>lhs-&gt;rhs</c>) and repeated labels are supported; ellipses are
 /// not, because no shipped program uses them.
 /// </remarks>
-public static class EinsumOps
+internal static class EinsumOps
 {
     /// <summary>Evaluates <paramref name="equation"/> over <paramref name="operands"/>.</summary>
     public static PaddleTensor Apply(string equation, IReadOnlyList<PaddleTensor> operands)

@@ -13,7 +13,7 @@ namespace PaddleOcrSharp.Models.Vision;
 /// </para>
 /// <para>
 /// Upstream keeps an LFU cache of up to 20 grids because a page yields many crops that share a
-/// shape; <see cref="Interpolator"/> does the same with a plain most-used-wins eviction.
+/// shape; this type does the same with a plain most-used-wins eviction.
 /// </para>
 /// </remarks>
 public sealed class PositionEmbeddingInterpolator

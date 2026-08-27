@@ -3,7 +3,7 @@ using PaddleOcrSharp.Formats.Paddle;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>NumPy-style broadcasting shared by the element-wise kernels.</summary>
-public static class Broadcast
+internal static class Broadcast
 {
     /// <summary>
     /// Computes the broadcast result shape of <paramref name="left"/> and <paramref name="right"/>.

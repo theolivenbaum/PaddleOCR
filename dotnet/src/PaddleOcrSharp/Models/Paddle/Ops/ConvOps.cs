@@ -3,7 +3,7 @@ using PaddleOcrSharp.Core;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Convolution and pooling, in NCHW layout.</summary>
-public static class ConvOps
+internal static class ConvOps
 {
     /// <summary>
     /// 2-D convolution, matching <c>pd_op.conv2d</c> and <c>pd_op.depthwise_conv2d</c>.

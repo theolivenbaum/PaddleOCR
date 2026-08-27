@@ -1,7 +1,7 @@
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Resampling kernels: grid sampling and interpolation.</summary>
-public static class SamplingOps
+internal static class SamplingOps
 {
     /// <summary>
     /// Bilinear grid sampling, matching <c>pd_op.grid_sample</c>.

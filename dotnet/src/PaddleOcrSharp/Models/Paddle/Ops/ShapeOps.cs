@@ -3,7 +3,7 @@ using PaddleOcrSharp.Formats.Paddle;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Shape-manipulating kernels: layout, indexing and assembly.</summary>
-public static class ShapeOps
+internal static class ShapeOps
 {
     /// <summary>Permutes the dimensions of <paramref name="input"/>.</summary>
     public static PaddleTensor Transpose(PaddleTensor input, int[] permutation)

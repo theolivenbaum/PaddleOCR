@@ -3,7 +3,7 @@ using PaddleOcrSharp.Formats.Paddle;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Reductions, sorting and selection.</summary>
-public static class ReduceOps
+internal static class ReduceOps
 {
     /// <summary>How a reduction combines values.</summary>
     public enum Kind

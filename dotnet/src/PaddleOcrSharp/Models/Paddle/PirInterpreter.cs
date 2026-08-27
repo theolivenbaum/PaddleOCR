@@ -81,6 +81,7 @@ public sealed class PirInterpreter : IDisposable
     /// </summary>
     /// <param name="inputs">Feed tensors, keyed by the names in <see cref="InputNames"/>.</param>
     /// <param name="trace">Optional recorder for intermediate values.</param>
+    /// <param name="profile">Optional per-operator timing accumulator.</param>
     /// <returns>The fetched outputs, keyed by fetch name.</returns>
     public Dictionary<string, PaddleTensor> Run(
         IReadOnlyDictionary<string, PaddleTensor> inputs,

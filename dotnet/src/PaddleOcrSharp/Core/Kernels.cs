@@ -17,7 +17,6 @@ public static class Kernels
     public static void AddInPlace(Span<float> destination, ReadOnlySpan<float> source) =>
         TensorPrimitives.Add(destination, source[..destination.Length], destination);
 
-    /// <summary><c>destination += source · scale</c>.</summary>
     /// <summary>
     /// Adds <paramref name="source"/>, scaled four different ways, into four destinations.
     /// </summary>
@@ -67,6 +66,7 @@ public static class Kernels
         }
     }
 
+    /// <summary><c>destination += source · scale</c>.</summary>
     public static void AddScaled(Span<float> destination, ReadOnlySpan<float> source, float scale)
     {
         int length = destination.Length;

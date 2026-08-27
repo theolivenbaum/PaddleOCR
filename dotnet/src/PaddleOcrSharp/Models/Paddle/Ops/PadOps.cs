@@ -8,7 +8,7 @@ namespace PaddleOcrSharp.Models.Paddle.Ops;
 /// reaches it through the usual trick of unsqueezing an <c>NCHW</c> feature map to <c>NC1HW</c>
 /// so that a reflect-padded 2-D convolution can be expressed with the 3-D operator.
 /// </remarks>
-public static class PadOps
+internal static class PadOps
 {
     /// <summary>How to fill the padded border.</summary>
     public enum Mode

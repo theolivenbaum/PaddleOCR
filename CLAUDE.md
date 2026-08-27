@@ -150,7 +150,10 @@ SkiaSharp's resampler matches neither and is used only for decoding and encoding
   shadow copy. The GEMM widens one column panel at a time and reuses it across every activation
   row; widening inside the inner loop instead costs more than the multiply-adds it feeds.
 - **Every numerical stage is testable in isolation.** Each module exposes a deterministic entry
-  point that the parity tests feed with `.npz` fixtures dumped from the Python reference.
+  point that the parity tests feed with `.npz` fixtures dumped from the Python reference. That is
+  why the public surface is wider than a black-box library's would be; what is genuinely internal
+  to one component — the Paddle operator kernels behind the graph interpreter — is `internal`.
+  Public members are documented, and `GenerateDocumentationFile` makes a gap a build warning.
 - **No `float` accumulation shortcuts** where upstream forces `float32` (softmax, RoPE,
   RMSNorm variance) — match upstream precision decisions exactly.
 - **Stay native-AOT publishable.** Both libraries set `IsAotCompatible`, so the trim and AOT

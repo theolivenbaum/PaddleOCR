@@ -152,4 +152,8 @@ orientation classifier.*
 - [x] Benchmarks vs. Python reference (tokens/s, pages/min)
 - [x] GEMM/conv/attention blocking pass — layout graph 7.9s -> 5.2s, vision tower 19s -> 16s
 - [x] AOT-compatibility check for the CLI (publishes clean; `IsAotCompatible` guards regressions)
-- [~] Public API review + XML docs (every public member documented; a shape review is still open)
+- [x] Public API review. `GenerateDocumentationFile` turns on CS1591, so an undocumented public
+      member is now a warning rather than something nobody notices; the three gaps it found are
+      closed. The Paddle operator kernels are `internal` — nothing outside the interpreter used
+      them. The rest of the surface stays public on purpose: this port is meant to be inspectable
+      stage by stage, which is also how the parity tests reach it.

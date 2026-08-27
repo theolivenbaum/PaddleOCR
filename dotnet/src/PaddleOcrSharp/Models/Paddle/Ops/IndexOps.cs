@@ -1,7 +1,7 @@
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Scatter-style kernels that write into a copy of their first operand.</summary>
-public static class IndexOps
+internal static class IndexOps
 {
     /// <summary>
     /// Writes <paramref name="value"/> into <paramref name="input"/> at the positions addressed by
