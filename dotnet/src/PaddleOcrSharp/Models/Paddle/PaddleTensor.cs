@@ -52,17 +52,41 @@ public sealed class PaddleTensor
     public Span<long> IntSpan => (Ints ?? throw new InvalidOperationException(
         $"Tensor of dtype {Dtype} has no integer storage.")).AsSpan(0, Count);
 
-    /// <summary>Allocates a float tensor.</summary>
+    /// <summary>
+    /// Allocates a float tensor whose contents are undefined.
+    /// </summary>
+    /// <remarks>
+    /// Intermediate tensors in a graph are always written in full by the operator that produces
+    /// them, and zeroing them first is not free: a single <c>[1, 256, 200, 200]</c> feature map is
+    /// 41 MB, and a layout forward pass produces hundreds of them. Use <see cref="Zeros(int[],
+    /// PaddleDType)"/> for the few operators that accumulate into their output.
+    /// </remarks>
     public static PaddleTensor Float(int[] shape, PaddleDType dtype = PaddleDType.Float32) =>
-        new(dtype, shape, new float[ElementCount(shape)], null);
+        new(dtype, shape, GC.AllocateUninitializedArray<float>(ElementCount(shape)), null);
 
-    /// <summary>Allocates an integer tensor.</summary>
+    /// <summary>Allocates an integer tensor whose contents are undefined.</summary>
     public static PaddleTensor Int(int[] shape, PaddleDType dtype = PaddleDType.Int64) =>
-        new(dtype, shape, null, new long[ElementCount(shape)]);
+        new(dtype, shape, null, GC.AllocateUninitializedArray<long>(ElementCount(shape)));
 
-    /// <summary>Allocates a tensor of the given dtype.</summary>
+    /// <summary>Allocates a tensor of the given dtype whose contents are undefined.</summary>
     public static PaddleTensor Allocate(int[] shape, PaddleDType dtype) =>
         dtype.IsFloat() ? Float(shape, dtype) : Int(shape, dtype);
+
+    /// <summary>Allocates a zero-filled tensor, for operators that accumulate into their output.</summary>
+    public static PaddleTensor Zeros(int[] shape, PaddleDType dtype = PaddleDType.Float32)
+    {
+        PaddleTensor tensor = Allocate(shape, dtype);
+        if (tensor.IsFloat)
+        {
+            tensor.FloatSpan.Clear();
+        }
+        else
+        {
+            tensor.IntSpan.Clear();
+        }
+
+        return tensor;
+    }
 
     /// <summary>Wraps existing float storage.</summary>
     public static PaddleTensor FromFloats(float[] values, int[] shape, PaddleDType dtype = PaddleDType.Float32) =>
@@ -203,9 +227,20 @@ public sealed class PaddleTensor
     }
 
     /// <summary>Deep copy.</summary>
-    public PaddleTensor Clone() => Floats is not null
-        ? FromFloats([.. Floats.AsSpan(0, Count)], [.. Shape], Dtype)
-        : FromInts([.. Ints!.AsSpan(0, Count)], [.. Shape], Dtype);
+    public PaddleTensor Clone()
+    {
+        PaddleTensor copy = Allocate([.. Shape], Dtype);
+        if (IsFloat)
+        {
+            FloatSpan.CopyTo(copy.FloatSpan);
+        }
+        else
+        {
+            IntSpan.CopyTo(copy.IntSpan);
+        }
+
+        return copy;
+    }
 
     /// <summary>Materialises a parameter from a memory-mapped weight file.</summary>
     public static PaddleTensor FromParameter(PaddleParameter parameter)

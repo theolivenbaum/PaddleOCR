@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../PaddleOcrSharp/PaddleOcrSharp.csproj" />
+    <ProjectReference Include="../PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -27,9 +27,8 @@ public class ModelDownloaderTests : IDisposable
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
         var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("a.json"), new ModelFile("weights.bin")]);
 
-        var reports = new List<DownloadProgress>();
-        string directory = await downloader.EnsureAsync(
-            model, new Progress<DownloadProgress>(reports.Add), TestContext.Current.CancellationToken);
+        var reports = new Collector();
+        string directory = await downloader.EnsureAsync(model, reports, TestContext.Current.CancellationToken);
 
         Assert.True(File.Exists(Path.Combine(directory, "a.json")));
         Assert.Equal(4096, new FileInfo(Path.Combine(directory, "weights.bin")).Length);
@@ -46,12 +45,11 @@ public class ModelDownloaderTests : IDisposable
         await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
         int firstBodyCount = handler.BodyRequests;
 
-        var reports = new List<DownloadProgress>();
-        await downloader.EnsureAsync(
-            model, new Progress<DownloadProgress>(reports.Add), TestContext.Current.CancellationToken);
+        var reports = new Collector();
+        await downloader.EnsureAsync(model, reports, TestContext.Current.CancellationToken);
 
         Assert.Equal(firstBodyCount, handler.BodyRequests);
-        Assert.Contains(reports, report => report.Cached);
+        Assert.Contains(reports.Reports, report => report.Cached);
     }
 
     [Fact]
@@ -134,6 +132,35 @@ public class ModelDownloaderTests : IDisposable
         if (Directory.Exists(_cache))
         {
             Directory.Delete(_cache, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A synchronous progress sink. <see cref="Progress{T}"/> posts to the thread pool, so a
+    /// report can still be in flight when the test asserts on it.
+    /// </summary>
+    private sealed class Collector : IProgress<DownloadProgress>
+    {
+        private readonly List<DownloadProgress> _reports = [];
+        private readonly Lock _gate = new();
+
+        public IReadOnlyList<DownloadProgress> Reports
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _reports];
+                }
+            }
+        }
+
+        public void Report(DownloadProgress value)
+        {
+            lock (_gate)
+            {
+                _reports.Add(value);
+            }
         }
     }
 

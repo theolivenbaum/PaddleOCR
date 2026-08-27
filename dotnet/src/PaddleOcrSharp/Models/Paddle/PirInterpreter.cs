@@ -247,7 +247,10 @@ public sealed class PirInterpreter : IDisposable
                 PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
                 double[] data = operation.Attribute("values")!.AsDoubleArray();
                 int[] dimensions = [.. shape.Select(x => (int)x)];
-                PaddleTensor result = PaddleTensor.Allocate(dimensions, dtype);
+
+                // The attribute may carry fewer values than the shape declares; the remainder is
+                // zero, so this one cannot start from an uninitialised buffer.
+                PaddleTensor result = PaddleTensor.Zeros(dimensions, dtype);
                 for (int i = 0; i < result.Count && i < data.Length; i++)
                 {
                     if (result.IsFloat)

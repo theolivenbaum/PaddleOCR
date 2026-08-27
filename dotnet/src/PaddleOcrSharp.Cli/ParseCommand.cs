@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Layout;
+using PaddleOcrSharp.Pdf;
 using PaddleOcrSharp.Pipeline;
 
 namespace PaddleOcrSharp.Cli;
@@ -45,9 +46,34 @@ public static class ParseCommand
                 .ConfigureAwait(false)
             : null;
 
+        bool useOrientation = command.GetBool("doc-orientation", false);
+        bool useUnwarping = command.GetBool("doc-unwarping", false);
+
+        string? orientationDirectory = useOrientation
+            ? await ModelLocator.ResolveOptionalAsync(
+                command,
+                PaddleOcrSharp.Download.ModelCatalog.DocOrientationClassifier,
+                "orientation-dir",
+                "PP_LCNET_DOC_ORI_DIR",
+                allowDownload: true,
+                cancellation.Token).ConfigureAwait(false)
+            : null;
+
+        string? unwarpingDirectory = useUnwarping
+            ? await ModelLocator.ResolveOptionalAsync(
+                command,
+                PaddleOcrSharp.Download.ModelCatalog.DocUnwarping,
+                "unwarping-dir",
+                "UVDOC_DIR",
+                allowDownload: true,
+                cancellation.Token).ConfigureAwait(false)
+            : null;
+
         var options = DocumentParserOptions.Default with
         {
             UseLayoutDetection = useLayout,
+            UseDocOrientationClassify = useOrientation && orientationDirectory is not null,
+            UseDocUnwarping = useUnwarping && unwarpingDirectory is not null,
             UseChartRecognition = command.GetBool("chart", false),
             UseSealRecognition = command.GetBool("seal", false),
             UseOcrForImageBlocks = command.GetBool("ocr-images", false),
@@ -61,7 +87,8 @@ public static class ParseCommand
         };
 
         var clock = Stopwatch.StartNew();
-        using DocumentParser parser = DocumentParser.Load(modelDirectory, layoutDirectory);
+        using DocumentParser parser = DocumentParser.Load(
+            modelDirectory, layoutDirectory, orientationDirectory, unwarpingDirectory);
         Console.Error.WriteLine($"Models loaded in {clock.Elapsed.TotalSeconds:F1}s");
 
         string? outputDirectory = command.Get("output-dir");
@@ -71,23 +98,34 @@ public static class ParseCommand
         }
 
         var pages = new List<ParsedPage>();
+        int dpi = command.GetInt("dpi", PdfRasterizer.DefaultDpi);
+        int maxPages = command.GetInt("max-pages", 0);
+        int pageIndex = 0;
 
-        for (int index = 0; index < command.Positional.Count; index++)
+        foreach (string path in command.Positional)
         {
-            string path = command.Positional[index];
-            using RgbImage image = ImageIO.Load(path);
-
-            clock.Restart();
-            var progress = new Progress<BlockProgress>(value =>
-                Console.Error.Write($"\r  block {value.BlockIndex + 1}/{value.BlockCount} ({value.Label})      "));
-
-            ParsedPage page = parser.Parse(image, options, index, progress, cancellation.Token);
-            Console.Error.WriteLine($"\r{Path.GetFileName(path)}: {page.Blocks.Count} blocks in {clock.Elapsed.TotalSeconds:F1}s");
-            pages.Add(page);
-
-            if (outputDirectory is not null)
+            foreach ((RgbImage image, string label) in LoadPages(path, dpi, maxPages, command.Get("password")))
             {
-                await WritePageAsync(page, path, outputDirectory, options, cancellation.Token).ConfigureAwait(false);
+                using (image)
+                {
+                    clock.Restart();
+                    var progress = new Progress<BlockProgress>(value =>
+                        Console.Error.Write(
+                            $"\r  block {value.BlockIndex + 1}/{value.BlockCount} ({value.Label})      "));
+
+                    ParsedPage page = parser.Parse(image, options, pageIndex, progress, cancellation.Token);
+                    Console.Error.WriteLine(
+                        $"\r{label}: {page.Blocks.Count} blocks in {clock.Elapsed.TotalSeconds:F1}s");
+                    pages.Add(page);
+
+                    if (outputDirectory is not null)
+                    {
+                        await WritePageAsync(page, label, outputDirectory, options, cancellation.Token)
+                            .ConfigureAwait(false);
+                    }
+                }
+
+                pageIndex++;
             }
         }
 
@@ -102,14 +140,38 @@ public static class ParseCommand
         return 0;
     }
 
+    /// <summary>
+    /// Yields every page of an input: one for an image file, one per rendered page for a PDF.
+    /// </summary>
+    private static IEnumerable<(RgbImage Image, string Label)> LoadPages(
+        string path,
+        int dpi,
+        int maxPages,
+        string? password)
+    {
+        string stem = Path.GetFileNameWithoutExtension(path);
+
+        if (!Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return (ImageIO.Load(path), stem);
+            yield break;
+        }
+
+        int index = 0;
+        foreach (RgbImage page in PdfRasterizer.Render(path, dpi, password, maxPages))
+        {
+            yield return (page, $"{stem}_page{index + 1:D3}");
+            index++;
+        }
+    }
+
     private static async Task WritePageAsync(
         ParsedPage page,
-        string sourcePath,
+        string stem,
         string outputDirectory,
         DocumentParserOptions options,
         CancellationToken cancellationToken)
     {
-        string stem = Path.GetFileNameWithoutExtension(sourcePath);
 
         await File.WriteAllTextAsync(
             Path.Combine(outputDirectory, $"{stem}.md"),

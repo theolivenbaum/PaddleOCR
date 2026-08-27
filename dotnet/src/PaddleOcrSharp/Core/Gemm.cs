@@ -69,57 +69,54 @@ public static class Gemm
             throw new ArgumentException("Bias buffer is too small.", nameof(bias));
         }
 
-        long work = (long)rows * cols * inner;
-        int threads = Environment.ProcessorCount;
-
-        if (work < ParallelThreshold || threads <= 1)
+        if ((long)rows * cols * inner < ParallelThreshold || Environment.ProcessorCount <= 1)
         {
-            RunRowRange(x.Span, inner, weight, bias.Span, y.Span, cols, 0, rows);
+            RunPanel(x.Span, rows, inner, weight, bias.Span, y.Span, cols, 0, cols);
             return;
         }
 
-        // Split along m so every thread writes a disjoint, contiguous run of output rows.
-        // When m is small (decoding a single token) split along n instead.
-        if (rows >= threads)
+        // Split along the output columns, not the rows: a thread that owns a column panel walks
+        // the same slice of the weight matrix for every activation row, so the panel stays in
+        // cache. Splitting along rows would make every thread stream the whole weight matrix once
+        // per row, which for a 1152x4304 projection is 10 MB of traffic per token.
+        int panel = ChoosePanelWidth(inner, cols, weight.Dtype);
+        int panels = (cols + panel - 1) / panel;
+
+        Parallel.For(0, panels, index =>
         {
-            int chunk = (rows + threads - 1) / threads;
-            Parallel.For(0, (rows + chunk - 1) / chunk, block =>
-            {
-                int start = block * chunk;
-                RunRowRange(
-                    x.Span, inner, weight, bias.Span, y.Span, cols, start, Math.Min(chunk, rows - start));
-            });
-        }
-        else
-        {
-            int chunk = Math.Max(ColBlock, (cols + threads - 1) / threads);
-            chunk = (chunk + ColBlock - 1) / ColBlock * ColBlock;
-            Parallel.For(0, (cols + chunk - 1) / chunk, block =>
-            {
-                int start = block * chunk;
-                RunColRange(
-                    x.Span, rows, inner, weight, bias.Span, y.Span, cols, start, Math.Min(chunk, cols - start));
-            });
-        }
+            int start = index * panel;
+            RunPanel(
+                x.Span, rows, inner, weight, bias.Span, y.Span, cols, start, Math.Min(panel, cols - start));
+        });
     }
 
-    private static void RunRowRange(
-        ReadOnlySpan<float> x,
-        int inner,
-        WeightMatrix weight,
-        ReadOnlySpan<float> bias,
-        Span<float> y,
-        int cols,
-        int rowStart,
-        int rowCount)
+    /// <summary>
+    /// Chooses a column-panel width whose slice of the weight matrix stays inside L2.
+    /// </summary>
+    private static int ChoosePanelWidth(int inner, int cols, DType dtype)
     {
-        for (int m = rowStart; m < rowStart + rowCount; m++)
-        {
-            RunTile(x, inner, weight, bias, y, cols, m, 1, 0, cols);
-        }
+        const int TargetPanelBytes = 256 * 1024;
+
+        int rowBytes = Math.Max(1, inner * dtype.ByteSize());
+        int panel = Math.Max(ColBlock, TargetPanelBytes / rowBytes);
+        panel = (panel + ColBlock - 1) / ColBlock * ColBlock;
+
+        // Never leave threads idle: cap the panel so there is at least one per processor.
+        int maximum = Math.Max(ColBlock, (cols + Environment.ProcessorCount - 1) / Environment.ProcessorCount);
+        maximum = (maximum + ColBlock - 1) / ColBlock * ColBlock;
+
+        return Math.Min(panel, Math.Max(ColBlock, maximum));
     }
 
-    private static void RunColRange(
+    /// <summary>
+    /// Computes one column panel for every activation row.
+    /// </summary>
+    /// <remarks>
+    /// The panel's weights are widened to float32 once and reused across every activation row.
+    /// Widening inside the inner loop instead would cost one shift and one interleave for every
+    /// four multiply-adds, which caps the kernel at a fraction of the machine's FMA throughput.
+    /// </remarks>
+    private static void RunPanel(
         ReadOnlySpan<float> x,
         int rows,
         int inner,
@@ -130,56 +127,243 @@ public static class Gemm
         int colStart,
         int colCount)
     {
+        using PooledBuffer panel = TensorPool.Rent(colCount * inner);
+        Span<float> w = panel.Span;
+        weight.CopyRows(colStart, colCount, w);
+
+        int colEnd = colStart + colCount;
+        Span<float> tile = stackalloc float[16];
+
         int m = 0;
         for (; m <= rows - RowBlock; m += RowBlock)
         {
-            RunTile(x, inner, weight, bias, y, cols, m, RowBlock, colStart, colCount);
-        }
+            ReadOnlySpan<float> x0 = x.Slice(m * inner, inner);
+            ReadOnlySpan<float> x1 = x.Slice((m + 1) * inner, inner);
+            ReadOnlySpan<float> x2 = x.Slice((m + 2) * inner, inner);
+            ReadOnlySpan<float> x3 = x.Slice((m + 3) * inner, inner);
 
-        for (; m < rows; m++)
-        {
-            RunTile(x, inner, weight, bias, y, cols, m, 1, colStart, colCount);
-        }
-    }
-
-    private static void RunTile(
-        ReadOnlySpan<float> x,
-        int inner,
-        WeightMatrix weight,
-        ReadOnlySpan<float> bias,
-        Span<float> y,
-        int cols,
-        int rowStart,
-        int rowCount,
-        int colStart,
-        int colCount)
-    {
-        int colEnd = colStart + colCount;
-
-        for (int m = rowStart; m < rowStart + rowCount; m++)
-        {
-            ReadOnlySpan<float> xr = x.Slice(m * inner, inner);
-            Span<float> yr = y.Slice(m * cols, cols);
-
-            int n = colStart;
-            for (; n <= colEnd - ColBlock; n += ColBlock)
+            int local = 0;
+            for (; local <= colCount - ColBlock; local += ColBlock)
             {
-                weight.Dot4(xr, n, out float a0, out float a1, out float a2, out float a3);
-                yr[n] = a0;
-                yr[n + 1] = a1;
-                yr[n + 2] = a2;
-                yr[n + 3] = a3;
+                Dot4x4(x0, x1, x2, x3, w, local * inner, inner, tile);
+                for (int r = 0; r < RowBlock; r++)
+                {
+                    Span<float> row = y.Slice(((m + r) * cols) + colStart + local, ColBlock);
+                    row[0] = tile[r * 4];
+                    row[1] = tile[(r * 4) + 1];
+                    row[2] = tile[(r * 4) + 2];
+                    row[3] = tile[(r * 4) + 3];
+                }
             }
 
-            for (; n < colEnd; n++)
+            for (; local < colCount; local++)
             {
-                yr[n] = weight.Dot(xr, n);
+                ReadOnlySpan<float> wr = w.Slice(local * inner, inner);
+                y[(m * cols) + colStart + local] = Dot(x0, wr);
+                y[((m + 1) * cols) + colStart + local] = Dot(x1, wr);
+                y[((m + 2) * cols) + colStart + local] = Dot(x2, wr);
+                y[((m + 3) * cols) + colStart + local] = Dot(x3, wr);
             }
 
             if (!bias.IsEmpty)
             {
-                Kernels.AddInPlace(yr[colStart..colEnd], bias[colStart..colEnd]);
+                for (int r = 0; r < RowBlock; r++)
+                {
+                    Kernels.AddInPlace(y.Slice(((m + r) * cols) + colStart, colCount), bias[colStart..colEnd]);
+                }
             }
+        }
+
+        for (; m < rows; m++)
+        {
+            ReadOnlySpan<float> xr = x.Slice(m * inner, inner);
+            Span<float> yr = y.Slice((m * cols) + colStart, colCount);
+
+            for (int local = 0; local < colCount; local++)
+            {
+                yr[local] = Dot(xr, w.Slice(local * inner, inner));
+            }
+
+            if (!bias.IsEmpty)
+            {
+                Kernels.AddInPlace(yr, bias[colStart..colEnd]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sixteen dot products: four activation rows against four consecutive float32 weight rows.
+    /// </summary>
+    /// <param name="x0">First activation row.</param>
+    /// <param name="x1">Second activation row.</param>
+    /// <param name="x2">Third activation row.</param>
+    /// <param name="x3">Fourth activation row.</param>
+    /// <param name="w">Widened weight panel.</param>
+    /// <param name="offset">Index of the first weight row inside <paramref name="w"/>.</param>
+    /// <param name="stride">Distance between consecutive weight rows.</param>
+    /// <param name="results">Receives 16 results, activation-major: <c>results[i * 4 + j]</c>.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Dot4x4(
+        ReadOnlySpan<float> x0,
+        ReadOnlySpan<float> x1,
+        ReadOnlySpan<float> x2,
+        ReadOnlySpan<float> x3,
+        ReadOnlySpan<float> w,
+        int offset,
+        int stride,
+        Span<float> results)
+    {
+        int length = x0.Length;
+        int i = 0;
+
+        if (Vector512.IsHardwareAccelerated && length >= Vector512<float>.Count)
+        {
+            Vector512<float> a00 = Vector512<float>.Zero, a01 = Vector512<float>.Zero;
+            Vector512<float> a02 = Vector512<float>.Zero, a03 = Vector512<float>.Zero;
+            Vector512<float> a10 = Vector512<float>.Zero, a11 = Vector512<float>.Zero;
+            Vector512<float> a12 = Vector512<float>.Zero, a13 = Vector512<float>.Zero;
+            Vector512<float> a20 = Vector512<float>.Zero, a21 = Vector512<float>.Zero;
+            Vector512<float> a22 = Vector512<float>.Zero, a23 = Vector512<float>.Zero;
+            Vector512<float> a30 = Vector512<float>.Zero, a31 = Vector512<float>.Zero;
+            Vector512<float> a32 = Vector512<float>.Zero, a33 = Vector512<float>.Zero;
+
+            for (; i <= length - Vector512<float>.Count; i += Vector512<float>.Count)
+            {
+                Vector512<float> w0 = Vector512.LoadUnsafe(in w[offset + i]);
+                Vector512<float> w1 = Vector512.LoadUnsafe(in w[offset + stride + i]);
+                Vector512<float> w2 = Vector512.LoadUnsafe(in w[offset + (2 * stride) + i]);
+                Vector512<float> w3 = Vector512.LoadUnsafe(in w[offset + (3 * stride) + i]);
+
+                Vector512<float> v = Vector512.LoadUnsafe(in x0[i]);
+                a00 = Vector512.FusedMultiplyAdd(v, w0, a00);
+                a01 = Vector512.FusedMultiplyAdd(v, w1, a01);
+                a02 = Vector512.FusedMultiplyAdd(v, w2, a02);
+                a03 = Vector512.FusedMultiplyAdd(v, w3, a03);
+
+                v = Vector512.LoadUnsafe(in x1[i]);
+                a10 = Vector512.FusedMultiplyAdd(v, w0, a10);
+                a11 = Vector512.FusedMultiplyAdd(v, w1, a11);
+                a12 = Vector512.FusedMultiplyAdd(v, w2, a12);
+                a13 = Vector512.FusedMultiplyAdd(v, w3, a13);
+
+                v = Vector512.LoadUnsafe(in x2[i]);
+                a20 = Vector512.FusedMultiplyAdd(v, w0, a20);
+                a21 = Vector512.FusedMultiplyAdd(v, w1, a21);
+                a22 = Vector512.FusedMultiplyAdd(v, w2, a22);
+                a23 = Vector512.FusedMultiplyAdd(v, w3, a23);
+
+                v = Vector512.LoadUnsafe(in x3[i]);
+                a30 = Vector512.FusedMultiplyAdd(v, w0, a30);
+                a31 = Vector512.FusedMultiplyAdd(v, w1, a31);
+                a32 = Vector512.FusedMultiplyAdd(v, w2, a32);
+                a33 = Vector512.FusedMultiplyAdd(v, w3, a33);
+            }
+
+            results[0] = Vector512.Sum(a00);
+            results[1] = Vector512.Sum(a01);
+            results[2] = Vector512.Sum(a02);
+            results[3] = Vector512.Sum(a03);
+            results[4] = Vector512.Sum(a10);
+            results[5] = Vector512.Sum(a11);
+            results[6] = Vector512.Sum(a12);
+            results[7] = Vector512.Sum(a13);
+            results[8] = Vector512.Sum(a20);
+            results[9] = Vector512.Sum(a21);
+            results[10] = Vector512.Sum(a22);
+            results[11] = Vector512.Sum(a23);
+            results[12] = Vector512.Sum(a30);
+            results[13] = Vector512.Sum(a31);
+            results[14] = Vector512.Sum(a32);
+            results[15] = Vector512.Sum(a33);
+        }
+        else if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        {
+            Vector256<float> a00 = Vector256<float>.Zero, a01 = Vector256<float>.Zero;
+            Vector256<float> a02 = Vector256<float>.Zero, a03 = Vector256<float>.Zero;
+            Vector256<float> a10 = Vector256<float>.Zero, a11 = Vector256<float>.Zero;
+            Vector256<float> a12 = Vector256<float>.Zero, a13 = Vector256<float>.Zero;
+            Vector256<float> a20 = Vector256<float>.Zero, a21 = Vector256<float>.Zero;
+            Vector256<float> a22 = Vector256<float>.Zero, a23 = Vector256<float>.Zero;
+            Vector256<float> a30 = Vector256<float>.Zero, a31 = Vector256<float>.Zero;
+            Vector256<float> a32 = Vector256<float>.Zero, a33 = Vector256<float>.Zero;
+
+            for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
+            {
+                Vector256<float> w0 = Vector256.LoadUnsafe(in w[offset + i]);
+                Vector256<float> w1 = Vector256.LoadUnsafe(in w[offset + stride + i]);
+                Vector256<float> w2 = Vector256.LoadUnsafe(in w[offset + (2 * stride) + i]);
+                Vector256<float> w3 = Vector256.LoadUnsafe(in w[offset + (3 * stride) + i]);
+
+                Vector256<float> v = Vector256.LoadUnsafe(in x0[i]);
+                a00 = Vector256.FusedMultiplyAdd(v, w0, a00);
+                a01 = Vector256.FusedMultiplyAdd(v, w1, a01);
+                a02 = Vector256.FusedMultiplyAdd(v, w2, a02);
+                a03 = Vector256.FusedMultiplyAdd(v, w3, a03);
+
+                v = Vector256.LoadUnsafe(in x1[i]);
+                a10 = Vector256.FusedMultiplyAdd(v, w0, a10);
+                a11 = Vector256.FusedMultiplyAdd(v, w1, a11);
+                a12 = Vector256.FusedMultiplyAdd(v, w2, a12);
+                a13 = Vector256.FusedMultiplyAdd(v, w3, a13);
+
+                v = Vector256.LoadUnsafe(in x2[i]);
+                a20 = Vector256.FusedMultiplyAdd(v, w0, a20);
+                a21 = Vector256.FusedMultiplyAdd(v, w1, a21);
+                a22 = Vector256.FusedMultiplyAdd(v, w2, a22);
+                a23 = Vector256.FusedMultiplyAdd(v, w3, a23);
+
+                v = Vector256.LoadUnsafe(in x3[i]);
+                a30 = Vector256.FusedMultiplyAdd(v, w0, a30);
+                a31 = Vector256.FusedMultiplyAdd(v, w1, a31);
+                a32 = Vector256.FusedMultiplyAdd(v, w2, a32);
+                a33 = Vector256.FusedMultiplyAdd(v, w3, a33);
+            }
+
+            results[0] = Vector256.Sum(a00);
+            results[1] = Vector256.Sum(a01);
+            results[2] = Vector256.Sum(a02);
+            results[3] = Vector256.Sum(a03);
+            results[4] = Vector256.Sum(a10);
+            results[5] = Vector256.Sum(a11);
+            results[6] = Vector256.Sum(a12);
+            results[7] = Vector256.Sum(a13);
+            results[8] = Vector256.Sum(a20);
+            results[9] = Vector256.Sum(a21);
+            results[10] = Vector256.Sum(a22);
+            results[11] = Vector256.Sum(a23);
+            results[12] = Vector256.Sum(a30);
+            results[13] = Vector256.Sum(a31);
+            results[14] = Vector256.Sum(a32);
+            results[15] = Vector256.Sum(a33);
+        }
+        else
+        {
+            results[..16].Clear();
+        }
+
+        for (; i < length; i++)
+        {
+            float w0 = w[offset + i];
+            float w1 = w[offset + stride + i];
+            float w2 = w[offset + (2 * stride) + i];
+            float w3 = w[offset + (3 * stride) + i];
+
+            results[0] += x0[i] * w0;
+            results[1] += x0[i] * w1;
+            results[2] += x0[i] * w2;
+            results[3] += x0[i] * w3;
+            results[4] += x1[i] * w0;
+            results[5] += x1[i] * w1;
+            results[6] += x1[i] * w2;
+            results[7] += x1[i] * w3;
+            results[8] += x2[i] * w0;
+            results[9] += x2[i] * w1;
+            results[10] += x2[i] * w2;
+            results[11] += x2[i] * w3;
+            results[12] += x3[i] * w0;
+            results[13] += x3[i] * w1;
+            results[14] += x3[i] * w2;
+            results[15] += x3[i] * w3;
         }
     }
 

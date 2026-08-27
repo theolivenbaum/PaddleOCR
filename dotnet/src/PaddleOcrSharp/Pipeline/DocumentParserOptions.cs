@@ -12,6 +12,15 @@ public sealed record DocumentParserOptions
     /// <summary>Whether layout detection runs; when off the whole page goes to the VL model.</summary>
     public bool UseLayoutDetection { get; init; } = true;
 
+    /// <summary>
+    /// Whether the page is rotated upright by the orientation classifier before parsing.
+    /// </summary>
+    /// <remarks>Off by default, matching the shipped 1.6 pipeline's <c>use_doc_preprocessor</c>.</remarks>
+    public bool UseDocOrientationClassify { get; init; }
+
+    /// <summary>Whether the page is flattened by UVDoc before parsing.</summary>
+    public bool UseDocUnwarping { get; init; }
+
     /// <summary>Whether chart blocks are recognised rather than kept as images.</summary>
     public bool UseChartRecognition { get; init; }
 
@@ -37,6 +46,16 @@ public sealed record DocumentParserOptions
     /// The instruction used when layout detection is off, i.e. the whole page is one block.
     /// </summary>
     public string WholePagePrompt { get; init; } = BlockPrompt.Ocr;
+
+    /// <summary>
+    /// The label given to the whole-page block when layout detection is off.
+    /// </summary>
+    /// <remarks>
+    /// Upstream selects this mode with <c>prompt_label</c>; the label matters because it decides
+    /// the instruction, the pixel budget and the post-processing. Use <c>"spotting"</c> to get
+    /// text-with-coordinates output over the whole page.
+    /// </remarks>
+    public string WholePageLabel { get; init; } = "text";
 
     /// <summary>Number of blocks recognised concurrently.</summary>
     /// <remarks>

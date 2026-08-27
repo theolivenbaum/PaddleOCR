@@ -67,9 +67,22 @@ A read-only checkout of PaddleX and the Hugging Face model metadata is expected 
 - Causal attention with a KV cache; greedy decoding by default.
 
 ### Layout (`PP-DocLayoutV3`)
-RT-DETR–style detector: HGNetV2-L backbone → hybrid encoder (`d_model 256`, 3 levels,
+An RT-DETR–style detector: HGNetV2-L backbone → hybrid encoder (`d_model 256`, 3 levels,
 strides 8/16/32) → 6-layer deformable decoder, 300 queries, 25 classes, plus mask and
-reading-order heads. Input `800×800`, no normalization (`mean 0`, `std 1`), `NCHW`.
+reading-order heads. Input `800×800`, `1/255` rescale, no mean/std, `NCHW`.
+
+**This model is not hand-ported.** It ships only as a Paddle inference graph — there is no
+upstream PyTorch module tree to port from — so `Models/Paddle` interprets the exported graph
+directly. Every operator in that interpreter is our own kernel; what we take from Paddle is the
+graph topology and the weights, both of which we would have to take anyway. The result is exact
+by construction instead of by inspection, and the same interpreter also runs UVDoc and the
+orientation classifier.
+
+The interpreter covers ~60 operators: `conv2d` / `depthwise_conv2d` (im2col + GEMM, with a
+direct path for depthwise), pooling, batch norm, layer norm, softmax, `matmul` / `bmm` / `einsum`,
+`grid_sample` (which is what deformable attention is built on), bilinear and nearest
+interpolation, broadcasting element-wise ops, reductions, `top_k`, `argsort`, `gather_nd`,
+`index_put`, `set_value` and the shape algebra.
 
 ---
 
@@ -87,9 +100,12 @@ dotnet/
       Text/                    # tokenizer (tokenizer.json BPE), chat template
       Models/Vision/           # SigLIP/NaViT encoder + projector
       Models/Language/         # ERNIE-4.5 decoder, KV cache, sampling
-      Models/Layout/           # PP-DocLayoutV3
+      Models/Layout/           # PP-DocLayoutV3 wrapper and detection post-processing
+      Models/Paddle/           # Paddle PIR graph interpreter and its operator kernels
+      Models/Preprocessing/    # orientation classifier, UVDoc unwarping
       Pipeline/                # orchestration, block prompts, markdown/OTSL assembly
       Download/                # model downloader (Hugging Face / BOS mirrors)
+    PaddleOcrSharp.Pdf/        # PDF page rasterisation (the one native dependency)
     PaddleOcrSharp.Cli/        # `paddleocr-sharp` command-line front-end
   tests/
     PaddleOcrSharp.Tests/      # unit + numerical-parity tests
@@ -97,12 +113,30 @@ dotnet/
     reference/                 # Python scripts that dump upstream reference tensors
 ```
 
+## Two bicubic resizes, deliberately
+
+The two model families reach C# through different Python image stacks, and their bicubic
+resamplers disagree:
+
+| | `PilResize` | `OpenCvResize` |
+| --- | --- | --- |
+| Used by | the VL model's `smart_resize` | the layout detector's 800×800 input |
+| Mirrors | `PIL.Image.resize(BICUBIC)` | `cv2.resize(INTER_CUBIC)` |
+| Kernel `a` | −0.5 | −0.75 |
+| Downscale | support scaled by `in/out` (antialiased) | fixed support (aliased) |
+| Border | kernel truncated | replicated |
+| Arithmetic | Q22 fixed point, two uint8 passes | float32 |
+| Parity | byte-exact | ≤1 level on ~0.02% of bytes |
+
+SkiaSharp's resampler matches neither and is used only for decoding and encoding.
+
 ## Engineering conventions
 
 - **.NET 10 / C# preview.** Use `System.Numerics.Tensors`, `Vector<T>` / `Vector512<T>`,
   `TensorPrimitives`, `ArrayPool<T>` and `MemoryPool<T>`. Hot loops must be allocation-free.
-- **Weights stay in their on-disk dtype where possible** (bf16) and are converted lazily per
-  tile inside the GEMM, so a 0.9B model does not need a 4 GB float32 shadow copy.
+- **Weights stay in their on-disk dtype** (bf16) so a 0.9B model does not need a 4 GB float32
+  shadow copy. The GEMM widens one column panel at a time and reuses it across every activation
+  row; widening inside the inner loop instead costs more than the multiply-adds it feeds.
 - **Every numerical stage is testable in isolation.** Each module exposes a deterministic entry
   point that the parity tests feed with `.npz` fixtures dumped from the Python reference.
 - **No `float` accumulation shortcuts** where upstream forces `float32` (softmax, RoPE,
@@ -117,6 +151,19 @@ demand (they are not committed) — see `dotnet/tools/reference/README.md`.
 
 Tests that need fixtures are skipped, not failed, when the fixture directory is absent, so
 `dotnet test` works on a clean clone.
+
+## Where the time goes
+
+Measured with `paddleocr-sharp bench` on 4 cores (AVX-512), a 980×392 page:
+
+| Stage | Cost |
+| --- | --- |
+| Vision tower (1960 patches) | ~19 s |
+| Decoder (503-token prefill + 32 tokens) | ~5 s |
+| Layout graph | ~9-12 s |
+
+The layout graph's own profile (`PirProfile`, printed by `bench`) attributes roughly a quarter
+of its time to `conv2d` and the rest to the element-wise and shape operators around it.
 
 ## Working agreements for this port
 

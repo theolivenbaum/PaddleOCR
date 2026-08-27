@@ -30,17 +30,40 @@ public static class PilResize
     /// <summary>Rounding bias added before the final arithmetic shift.</summary>
     private const int RoundingBias = 1 << (PrecisionBits - 1);
 
-    /// <summary>Support radius of the bicubic filter, in destination-pixel units.</summary>
-    private const double BicubicSupport = 2.0;
-
     /// <summary>Catmull-Rom <c>a</c> parameter; Pillow hard-codes −0.5.</summary>
     private const double BicubicA = -0.5;
+
+    /// <summary>Lobe count of Pillow's Lanczos filter.</summary>
+    private const double LanczosLobes = 3.0;
+
+    /// <summary>Resampling filters this port implements.</summary>
+    public enum Filter
+    {
+        /// <summary>Pillow's <c>BICUBIC</c>: Catmull-Rom with <c>a = −0.5</c>, support 2.</summary>
+        Bicubic,
+
+        /// <summary>Pillow's <c>LANCZOS</c>: a three-lobe windowed sinc, support 3.</summary>
+        Lanczos,
+    }
 
     /// <summary>
     /// Resizes <paramref name="source"/> to <paramref name="width"/> × <paramref name="height"/>
     /// with Pillow's bicubic filter.
     /// </summary>
-    public static RgbImage ResizeBicubic(RgbImage source, int width, int height)
+    public static RgbImage ResizeBicubic(RgbImage source, int width, int height) =>
+        Resize(source, width, height, Filter.Bicubic);
+
+    /// <summary>
+    /// Resizes <paramref name="source"/> to <paramref name="width"/> × <paramref name="height"/>
+    /// with Pillow's Lanczos filter, which is what the spotting pre-process uses.
+    /// </summary>
+    public static RgbImage ResizeLanczos(RgbImage source, int width, int height) =>
+        Resize(source, width, height, Filter.Lanczos);
+
+    /// <summary>
+    /// Resizes <paramref name="source"/> to <paramref name="width"/> × <paramref name="height"/>.
+    /// </summary>
+    public static RgbImage Resize(RgbImage source, int width, int height, Filter filter)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
@@ -59,7 +82,7 @@ public static class PilResize
         if (needHorizontal)
         {
             intermediate = RgbImage.Rent(width, source.Height);
-            ResampleHorizontal(source, intermediate);
+            ResampleHorizontal(source, intermediate, filter);
             current = intermediate;
         }
 
@@ -69,7 +92,7 @@ public static class PilResize
         }
 
         RgbImage result = RgbImage.Rent(width, height);
-        ResampleVertical(current, result);
+        ResampleVertical(current, result, filter);
         intermediate?.Dispose();
         return result;
     }
@@ -85,12 +108,13 @@ public static class PilResize
     internal static int PrecomputeCoefficients(
         int inSize,
         int outSize,
+        Filter filter,
         out int[] bounds,
         out int[] coefficients)
     {
         double scale = (double)inSize / outSize;
         double filterScale = Math.Max(scale, 1.0);
-        double support = BicubicSupport * filterScale;
+        double support = (filter == Filter.Lanczos ? LanczosLobes : 2.0) * filterScale;
 
         int kernelSize = ((int)Math.Ceiling(support) * 2) + 1;
 
@@ -122,7 +146,7 @@ public static class PilResize
                 double weightSum = 0.0;
                 for (int k = 0; k < count; k++)
                 {
-                    double w = BicubicFilter((k + min - center + 0.5) * inverseScale);
+                    double w = Evaluate(filter, (k + min - center + 0.5) * inverseScale);
                     taps[k] = w;
                     weightSum += w;
                 }
@@ -148,9 +172,10 @@ public static class PilResize
         return kernelSize;
     }
 
-    private static void ResampleHorizontal(RgbImage source, RgbImage destination)
+    private static void ResampleHorizontal(RgbImage source, RgbImage destination, Filter filter)
     {
-        int kernelSize = PrecomputeCoefficients(source.Width, destination.Width, out int[] bounds, out int[] coefficients);
+        int kernelSize = PrecomputeCoefficients(
+            source.Width, destination.Width, filter, out int[] bounds, out int[] coefficients);
 
         int height = source.Height;
         int outWidth = destination.Width;
@@ -187,9 +212,10 @@ public static class PilResize
         });
     }
 
-    private static void ResampleVertical(RgbImage source, RgbImage destination)
+    private static void ResampleVertical(RgbImage source, RgbImage destination, Filter filter)
     {
-        int kernelSize = PrecomputeCoefficients(source.Height, destination.Height, out int[] bounds, out int[] coefficients);
+        int kernelSize = PrecomputeCoefficients(
+            source.Height, destination.Height, filter, out int[] bounds, out int[] coefficients);
 
         int width = destination.Width;
         int outHeight = destination.Height;
@@ -222,6 +248,31 @@ public static class PilResize
                 dstRow[offset + 2] = Clip8(b);
             }
         });
+    }
+
+    private static double Evaluate(Filter filter, double x) =>
+        filter == Filter.Lanczos ? LanczosFilter(x) : BicubicFilter(x);
+
+    /// <summary>Pillow's three-lobe windowed-sinc kernel.</summary>
+    private static double LanczosFilter(double x)
+    {
+        if (x is <= -LanczosLobes or >= LanczosLobes)
+        {
+            return 0.0;
+        }
+
+        return Sinc(x) * Sinc(x / LanczosLobes);
+    }
+
+    private static double Sinc(double x)
+    {
+        if (x == 0.0)
+        {
+            return 1.0;
+        }
+
+        double scaled = x * Math.PI;
+        return Math.Sin(scaled) / scaled;
     }
 
     /// <summary>Pillow's bicubic kernel with <c>a = −0.5</c>.</summary>

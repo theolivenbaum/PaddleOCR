@@ -40,12 +40,12 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] Mirror support (HF endpoint override, BOS/AIStudio)
 - [x] Manifests for `PaddleOCR-VL-1.6`, `PP-DocLayoutV3`, `PP-LCNet_x1_0_doc_ori`, `UVDoc`
 - [x] `paddleocr-sharp download` CLI verb + progress reporting
-- [ ] Tests: manifest resolution, cache hit/miss, resume, corrupt-file detection
+- [x] Tests: manifest resolution, cache hit/miss, resume, corrupt-file detection
 
 ## 4. Imaging — `src/PaddleOcrSharp/Imaging`
 
 - [x] SkiaSharp decode (PNG/JPEG/BMP/WEBP) → RGB planar, EXIF orientation
-- [ ] PDF page rasterisation (deferred — CLI accepts images first)
+- [x] PDF page rasterisation (`PaddleOcrSharp.Pdf`, PDFium via PDFtoImage)
 - [x] `SmartResize` port (`factor`, `min_pixels`, `max_pixels`, aspect-ratio guard)
 - [x] Bicubic resample matching PIL/`torchvision` (a = −0.5, antialias behaviour verified)
 - [x] Rescale + normalize + HWC→CHW, fused and vectorised
@@ -99,9 +99,9 @@ orientation classifier.*
 
 ## 9. Doc pre-processing (optional models)
 
-- [ ] `PP-LCNet_x1_0_doc_ori` orientation classifier (0/90/180/270)
-- [ ] `UVDoc` unwarping
-- [ ] Wire into pipeline behind `use_doc_orientation_classify` / `use_doc_unwarping`
+- [x] `PP-LCNet_x1_0_doc_ori` orientation classifier (0/90/180/270)
+- [x] `UVDoc` unwarping
+- [x] Wire into pipeline behind `use_doc_orientation_classify` / `use_doc_unwarping`
 
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`
 
@@ -113,16 +113,16 @@ orientation classifier.*
 - [ ] Batched VL recognition scheduling
 - [x] OTSL → HTML table conversion
 - [x] Repetition truncation (`truncate_repetitive_content`)
-- [ ] Spotting `<|LOC_n|>` post-processing
+- [x] Spotting `<|LOC_n|>` post-processing
 - [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
-- [ ] End-to-end parity test on a sample document
+- [x] End-to-end parity test on a sample document
 
 ## 11. CLI — `src/PaddleOcrSharp.Cli`
 
 - [x] `download` — fetch models
 - [x] `parse` — document → markdown / JSON, `--layout`, `--no-layout`, `--prompt-label`
 - [x] `bench` — throughput and allocation report
-- [ ] `dump` — emit internal tensors for parity debugging
+- [x] `dump` — internal tensors via `VisionTrace` / `IPirTrace`, operator timings via `bench`
 - [ ] Progress + structured logging
 
 ## 12. Reference tooling — `dotnet/tools/reference`
@@ -132,13 +132,13 @@ orientation classifier.*
 - [x] `dump_language.py` (logits, KV cache, greedy steps)
 - [x] `dump_tokenizer.py`
 - [x] `dump_layout.py`
-- [ ] `dump_end_to_end.py`
-- [ ] README describing fixture generation
+- [x] `dump_end_to_end.py`
+- [x] README describing fixture generation
 
 ## 13. Hardening
 
-- [ ] Multi-threading strategy + `ServerGC` tuning
-- [ ] Allocation audit (target: zero steady-state LOH traffic during decode)
-- [ ] Benchmarks vs. Python reference (tokens/s, pages/min)
+- [x] Multi-threading strategy + `ServerGC` tuning
+- [~] Allocation audit (decode is ~10 MiB/step; graph tensors now skip zero-initialisation)
+- [x] Benchmarks vs. Python reference (tokens/s, pages/min)
 - [ ] AOT-compatibility check for the CLI
 - [ ] Public API review + XML docs

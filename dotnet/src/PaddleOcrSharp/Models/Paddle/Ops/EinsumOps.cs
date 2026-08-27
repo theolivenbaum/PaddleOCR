@@ -54,7 +54,7 @@ public static class EinsumOps
         char[] all = [.. output, .. summed];
 
         int[] outputShape = [.. output.Select(label => sizes[label])];
-        PaddleTensor result = PaddleTensor.Float(outputShape);
+        PaddleTensor result = PaddleTensor.Zeros(outputShape);
 
         int[][] operandStrides = new int[operands.Count][];
         for (int i = 0; i < operands.Count; i++)

@@ -14,6 +14,11 @@ public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, in
 
     /// <summary>Suggested file name for <see cref="Image"/>.</summary>
     public string? ImagePath { get; init; }
+
+    /// <summary>
+    /// Text runs with their quadrilaterals, populated only for blocks recognised in spotting mode.
+    /// </summary>
+    public IReadOnlyList<SpottedText> SpottedText { get; init; } = [];
 }
 
 /// <summary>The parse of a single page.</summary>

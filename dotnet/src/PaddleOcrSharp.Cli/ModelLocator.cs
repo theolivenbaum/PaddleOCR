@@ -6,6 +6,41 @@ namespace PaddleOcrSharp.Cli;
 public static class ModelLocator
 {
     /// <summary>
+    /// Finds a catalogued model in the cache, downloading it when <paramref name="allowDownload"/>
+    /// is set and returning <see langword="null"/> when it is neither cached nor downloadable.
+    /// </summary>
+    public static async Task<string?> ResolveOptionalAsync(
+        CommandLine command,
+        ModelDescriptor model,
+        string overrideOption,
+        string environmentVariable,
+        bool allowDownload,
+        CancellationToken cancellationToken = default)
+    {
+        string? explicitPath = command.Get(overrideOption)
+            ?? Environment.GetEnvironmentVariable(environmentVariable);
+
+        if (!string.IsNullOrEmpty(explicitPath))
+        {
+            return explicitPath;
+        }
+
+        using var downloader = new ModelDownloader(command.Get("cache"), command.Get("endpoint"));
+        if (downloader.IsComplete(model))
+        {
+            return downloader.DirectoryFor(model);
+        }
+
+        if (!allowDownload)
+        {
+            return null;
+        }
+
+        Console.Error.WriteLine($"Fetching {model.Name} into {downloader.CacheRoot} …");
+        return await downloader.EnsureAsync(model, progress: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Finds the layout detector, downloading it when <paramref name="allowDownload"/> is set.
     /// </summary>
     public static async Task<string> ResolveLayoutAsync(

@@ -6,14 +6,13 @@ namespace PaddleOcrSharp.Models.Vision;
 /// Scaled dot-product attention over a single packed sequence, laid out per head.
 /// </summary>
 /// <remarks>
-/// Query rows are processed in tiles so a long sequence never materialises a full
-/// <c>[tokens, tokens]</c> score matrix: a 5120-patch page would need 100 MB per head otherwise.
+/// One score row is materialised at a time, so a long sequence never needs a full
+/// <c>[tokens, tokens]</c> matrix — a 5120-patch page would be 100 MB per head. Work is split
+/// across heads, and each head transposes its values once so the weighted sum is a long dot
+/// product per output channel rather than a short scaled add per key.
 /// </remarks>
 public static class Attention
 {
-    /// <summary>Query rows handled per tile.</summary>
-    private const int QueryTile = 64;
-
     /// <summary>
     /// Computes <c>softmax(Q · Kᵀ · scale) · V</c> for every head.
     /// </summary>
@@ -35,53 +34,48 @@ public static class Attention
         int headDim,
         float scale)
     {
-        int tiles = (tokens + QueryTile - 1) / QueryTile;
-        int totalTiles = heads * tiles;
+        Parallel.For(0, heads, head =>
+        {
+            int headOffset = head * tokens * headDim;
 
-        Parallel.For(
-            0,
-            totalTiles,
-            () => TensorPool.Rent(QueryTile * tokens),
-            (index, _, scores) =>
+            // Values are transposed once per head so the weighted sum becomes one long dot
+            // product per output channel instead of a short scaled add per key.
+            using PooledBuffer transposed = TensorPool.Rent(headDim * tokens);
+            Span<float> valueColumns = transposed.Span;
+            ReadOnlySpan<float> v = values.Span.Slice(headOffset, tokens * headDim);
+
+            for (int token = 0; token < tokens; token++)
             {
-                int head = index / tiles;
-                int tile = index % tiles;
-                int queryStart = tile * QueryTile;
-                int queryCount = Math.Min(QueryTile, tokens - queryStart);
-
-                int headOffset = head * tokens * headDim;
-                ReadOnlySpan<float> q = queries.Span.Slice(headOffset, tokens * headDim);
-                ReadOnlySpan<float> k = keys.Span.Slice(headOffset, tokens * headDim);
-                ReadOnlySpan<float> v = values.Span.Slice(headOffset, tokens * headDim);
-                Span<float> o = output.Span.Slice(headOffset, tokens * headDim);
-                Span<float> scoreBuffer = scores.Span;
-
-                for (int i = 0; i < queryCount; i++)
+                for (int d = 0; d < headDim; d++)
                 {
-                    ReadOnlySpan<float> queryRow = q.Slice((queryStart + i) * headDim, headDim);
-                    Span<float> scoreRow = scoreBuffer.Slice(i * tokens, tokens);
+                    valueColumns[(d * tokens) + token] = v[(token * headDim) + d];
+                }
+            }
 
-                    for (int j = 0; j < tokens; j++)
-                    {
-                        scoreRow[j] = Gemm.Dot(queryRow, k.Slice(j * headDim, headDim)) * scale;
-                    }
+            using PooledBuffer scores = TensorPool.Rent(tokens);
+            Span<float> scoreRow = scores.Span;
 
-                    Kernels.Softmax(scoreRow);
+            ReadOnlySpan<float> q = queries.Span.Slice(headOffset, tokens * headDim);
+            ReadOnlySpan<float> k = keys.Span.Slice(headOffset, tokens * headDim);
+            Span<float> o = output.Span.Slice(headOffset, tokens * headDim);
 
-                    Span<float> outputRow = o.Slice((queryStart + i) * headDim, headDim);
-                    outputRow.Clear();
-                    for (int j = 0; j < tokens; j++)
-                    {
-                        float weight = scoreRow[j];
-                        if (weight != 0f)
-                        {
-                            Kernels.AddScaled(outputRow, v.Slice(j * headDim, headDim), weight);
-                        }
-                    }
+            for (int i = 0; i < tokens; i++)
+            {
+                ReadOnlySpan<float> queryRow = q.Slice(i * headDim, headDim);
+
+                for (int j = 0; j < tokens; j++)
+                {
+                    scoreRow[j] = Gemm.Dot(queryRow, k.Slice(j * headDim, headDim)) * scale;
                 }
 
-                return scores;
-            },
-            scores => scores.Dispose());
+                Kernels.Softmax(scoreRow);
+
+                Span<float> outputRow = o.Slice(i * headDim, headDim);
+                for (int d = 0; d < headDim; d++)
+                {
+                    outputRow[d] = Gemm.Dot(scoreRow, valueColumns.Slice(d * tokens, tokens));
+                }
+            }
+        });
     }
 }

@@ -516,7 +516,7 @@ public static class ShapeOps
     /// <summary>An identity matrix of <paramref name="rows"/> × <paramref name="columns"/>.</summary>
     public static PaddleTensor Eye(int rows, int columns, PaddleDType dtype)
     {
-        PaddleTensor result = PaddleTensor.Allocate([rows, columns], dtype);
+        PaddleTensor result = PaddleTensor.Zeros([rows, columns], dtype);
         for (int i = 0; i < Math.Min(rows, columns); i++)
         {
             int index = (i * columns) + i;

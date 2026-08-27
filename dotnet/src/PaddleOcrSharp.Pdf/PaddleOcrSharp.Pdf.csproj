@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PaddleOcrSharp.Pdf</RootNamespace>
+    <AssemblyName>PaddleOcrSharp.Pdf</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>PaddleOcrSharp.Pdf</PackageId>
+    <Description>PDF page rasterisation for PaddleOcrSharp.</Description>
+    <!-- PDFium ships for every platform we target; the analyser cannot see that from the
+         package's support annotations. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PaddleOcrSharp/PaddleOcrSharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- PDFium renders the page; SkiaSharp receives the bitmap. Kept in its own assembly so the
+         core library stays free of native dependencies. -->
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
+  </ItemGroup>
+
+</Project>

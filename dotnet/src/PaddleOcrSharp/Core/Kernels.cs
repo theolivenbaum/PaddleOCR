@@ -143,10 +143,27 @@ public static class Kernels
         }
 
         float sum = 0f;
-        for (int i = 0; i < values.Length; i++)
+        int index = 0;
+
+        if (Vector256.IsHardwareAccelerated && values.Length >= Vector256<float>.Count)
         {
-            float e = MathF.Exp(values[i] - max);
-            values[i] = e;
+            Vector256<float> shift = Vector256.Create(max);
+            Vector256<float> total = Vector256<float>.Zero;
+
+            for (; index <= values.Length - Vector256<float>.Count; index += Vector256<float>.Count)
+            {
+                Vector256<float> e = Exp(Vector256.LoadUnsafe(in values[index]) - shift);
+                e.StoreUnsafe(ref values[index]);
+                total += e;
+            }
+
+            sum = Vector256.Sum(total);
+        }
+
+        for (; index < values.Length; index++)
+        {
+            float e = MathF.Exp(values[index] - max);
+            values[index] = e;
             sum += e;
         }
 

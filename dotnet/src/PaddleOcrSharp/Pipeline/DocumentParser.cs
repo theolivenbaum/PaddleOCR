@@ -1,6 +1,7 @@
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
 using PaddleOcrSharp.Models.Layout;
+using PaddleOcrSharp.Models.Preprocessing;
 
 namespace PaddleOcrSharp.Pipeline;
 
@@ -19,22 +20,50 @@ public sealed class DocumentParser : IDisposable
     private readonly LayoutDetector? _layout;
     private readonly bool _ownsModel;
 
+    private readonly DocOrientationClassifier? _orientation;
+    private readonly DocumentUnwarper? _unwarper;
+
     /// <summary>Creates a parser over an already-loaded model and detector.</summary>
-    public DocumentParser(PaddleOcrVLModel model, LayoutDetector? layout, bool ownsModel = false)
+    /// <param name="model">The vision-language model.</param>
+    /// <param name="layout">The layout detector, or <see langword="null"/> for whole-page mode.</param>
+    /// <param name="ownsModel">Whether disposing the parser disposes the model.</param>
+    /// <param name="orientation">Optional page-orientation classifier.</param>
+    /// <param name="unwarper">Optional page-flattening model.</param>
+    public DocumentParser(
+        PaddleOcrVLModel model,
+        LayoutDetector? layout,
+        bool ownsModel = false,
+        DocOrientationClassifier? orientation = null,
+        DocumentUnwarper? unwarper = null)
     {
         _model = model;
         _layout = layout;
         _ownsModel = ownsModel;
+        _orientation = orientation;
+        _unwarper = unwarper;
     }
 
-    /// <summary>Loads both models from their directories.</summary>
+    /// <summary>Loads the models from their directories.</summary>
     /// <param name="visionLanguageDirectory">Directory holding the PaddleOCR-VL checkpoint.</param>
     /// <param name="layoutDirectory">Directory holding PP-DocLayoutV3, or <see langword="null"/>.</param>
-    public static DocumentParser Load(string visionLanguageDirectory, string? layoutDirectory)
+    /// <param name="orientationDirectory">Directory holding PP-LCNet_x1_0_doc_ori, or <see langword="null"/>.</param>
+    /// <param name="unwarpingDirectory">Directory holding UVDoc, or <see langword="null"/>.</param>
+    public static DocumentParser Load(
+        string visionLanguageDirectory,
+        string? layoutDirectory,
+        string? orientationDirectory = null,
+        string? unwarpingDirectory = null)
     {
         PaddleOcrVLModel model = PaddleOcrVLModel.Load(visionLanguageDirectory);
         LayoutDetector? layout = layoutDirectory is null ? null : LayoutDetector.Load(layoutDirectory);
-        return new DocumentParser(model, layout, ownsModel: true);
+        DocOrientationClassifier? orientation = orientationDirectory is null
+            ? null
+            : DocOrientationClassifier.Load(orientationDirectory);
+        DocumentUnwarper? unwarper = unwarpingDirectory is null
+            ? null
+            : DocumentUnwarper.Load(unwarpingDirectory);
+
+        return new DocumentParser(model, layout, ownsModel: true, orientation, unwarper);
     }
 
     /// <summary>Parses one page.</summary>
@@ -52,9 +81,41 @@ public sealed class DocumentParser : IDisposable
     {
         DocumentParserOptions settings = options ?? DocumentParserOptions.Default;
 
+        RgbImage? prepared = null;
+        try
+        {
+            if (settings.UseDocOrientationClassify && _orientation is not null)
+            {
+                prepared = _orientation.Correct(page);
+                page = prepared;
+            }
+
+            if (settings.UseDocUnwarping && _unwarper is not null)
+            {
+                RgbImage flattened = _unwarper.Unwarp(page);
+                prepared?.Dispose();
+                prepared = flattened;
+                page = flattened;
+            }
+
+            return ParseCore(page, settings, pageIndex, progress, cancellationToken);
+        }
+        finally
+        {
+            prepared?.Dispose();
+        }
+    }
+
+    private ParsedPage ParseCore(
+        RgbImage page,
+        DocumentParserOptions settings,
+        int pageIndex,
+        IProgress<BlockProgress>? progress,
+        CancellationToken cancellationToken)
+    {
         IReadOnlyList<LayoutBox> regions = settings.UseLayoutDetection && _layout is not null
             ? _layout.Detect(page, settings.Layout)
-            : [WholePage(page)];
+            : [WholePage(page, settings.WholePageLabel)];
 
         if (settings.MergeLayoutBlocks && regions.Count > 1)
         {
@@ -117,16 +178,21 @@ public sealed class DocumentParser : IDisposable
             };
         }
 
-        string instruction = BlockPrompt.For(
-            region.Label, options.UseChartRecognition, options.UseSealRecognition);
+        string instruction = region.Label == "spotting"
+            ? BlockPrompt.Spotting
+            : BlockPrompt.For(region.Label, options.UseChartRecognition, options.UseSealRecognition);
 
-        using RgbImage prepared = instruction == BlockPrompt.Formula
-            ? CropMargin(crop)
-            : crop.Clone();
+        using RgbImage prepared = Prepare(crop, region.Label, instruction);
+
+        // Spotting encodes coordinates as `<|LOC_n|>` tokens, which are special tokens: dropping
+        // them during decoding would erase the geometry the mode exists to produce.
+        GenerationOptions generation = region.Label == "spotting"
+            ? options.Generation with { SkipSpecialTokens = false }
+            : options.Generation;
 
         VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label);
         string raw = _model.Recognize(
-            prepared, instruction, preprocessing, options.Generation, cancellationToken);
+            prepared, instruction, preprocessing, generation, cancellationToken);
 
         string content = RepetitionTruncator.Truncate(
             raw,
@@ -145,7 +211,37 @@ public sealed class DocumentParser : IDisposable
             }
         }
 
-        return new ParsedBlock(region.Label, region, content, region.ReadingOrder);
+        IReadOnlyList<SpottedText> spotted = [];
+        if (region.Label == "spotting")
+        {
+            (content, spotted) = Spotting.Parse(content, crop.Width, crop.Height);
+        }
+
+        return new ParsedBlock(region.Label, region, content, region.ReadingOrder)
+        {
+            SpottedText = spotted,
+        };
+    }
+
+    /// <summary>
+    /// Applies the per-instruction crop preparation: formulas get their margins trimmed, and a
+    /// small spotting crop is doubled with Lanczos so the coordinate grid has room to resolve.
+    /// </summary>
+    private static RgbImage Prepare(RgbImage crop, string label, string instruction)
+    {
+        if (instruction == BlockPrompt.Formula)
+        {
+            return CropMargin(crop);
+        }
+
+        if (label == "spotting"
+            && crop.Width < Spotting.UpscaleBelow
+            && crop.Height < Spotting.UpscaleBelow)
+        {
+            return PilResize.ResizeLanczos(crop, crop.Width * 2, crop.Height * 2);
+        }
+
+        return crop.Clone();
     }
 
     private static bool IsImageBlock(string label, DocumentParserOptions options)
@@ -280,8 +376,8 @@ public sealed class DocumentParser : IDisposable
         return merged;
     }
 
-    private static LayoutBox WholePage(RgbImage page) =>
-        new(-1, "text", 1f, 0f, 0f, page.Width, page.Height, 0);
+    private static LayoutBox WholePage(RgbImage page, string label) =>
+        new(-1, label, 1f, 0f, 0f, page.Width, page.Height, 0);
 
     /// <inheritdoc />
     public void Dispose()
@@ -292,6 +388,8 @@ public sealed class DocumentParser : IDisposable
         }
 
         _layout?.Dispose();
+        _orientation?.Dispose();
+        _unwarper?.Dispose();
     }
 }
 
