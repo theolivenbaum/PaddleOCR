@@ -7,9 +7,9 @@ The overview, the packages, the CLI and the library usage are in the
 
 | Project | Contents | Ships as |
 | --- | --- | --- |
-| `src/PaddleOcrSharp` | Tensors and SIMD kernels, safetensors and Paddle weight readers, the SigLIP vision tower, the ERNIE-4.5 decoder, the BPE tokenizer, the Paddle graph interpreter, the pipeline | `PaddleOcrSharp` |
-| `src/PaddleOcrSharp.Pdf` | PDF page rasterisation (the only native dependency: PDFium) | `PaddleOcrSharp.Pdf` |
-| `src/PaddleOcrSharp.Cli` | `paddleocr-sharp`: `download`, `parse`, `recognize`, `bench` | `PaddleOcrSharp.Cli`, a .NET tool |
+| `src/PaddleOcrSharp` | Tensors and SIMD kernels, safetensors and Paddle weight readers, the SigLIP vision tower, the ERNIE-4.5 decoder, the BPE tokenizer, the Paddle graph interpreter, the pipeline | `PaddleOCR` |
+| `src/PaddleOcrSharp.Pdf` | PDF page rasterisation (the only native dependency: PDFium) | `PaddleOCR.Pdf` |
+| `src/PaddleOcrSharp.Cli` | `paddleocr-sharp`: `download`, `parse`, `recognize`, `bench` | `PaddleOCR.Cli`, a .NET tool |
 | `tests/PaddleOcrSharp.Tests` | Unit tests plus numerical parity tests against the Python reference | — |
 | `tools/reference` | Python scripts that dump reference tensors — see [its README](tools/reference/README.md) | — |
 
@@ -26,7 +26,9 @@ so a clean clone goes green; `tools/reference/README.md` explains how to produce
 
 ## Packing
 
-Package metadata lives in [`Directory.Build.props`](Directory.Build.props); the repository README
+The package ids drop the `Sharp` the assemblies and namespaces keep — `PaddleOCR`,
+`PaddleOCR.Pdf`, `PaddleOCR.Cli` — the same split as `HNSW` and `HNSW.Net` in the sibling
+repository. Package metadata lives in [`Directory.Build.props`](Directory.Build.props); the repository README
 is attached to every packable project by [`Directory.Build.targets`](Directory.Build.targets),
 which runs after the project file has decided whether it is packable.
 
@@ -46,7 +48,7 @@ macOS ones — which takes the package from 197 MB to 71 MB. Add a RID there to 
 RID-specific publish (`-r linux-x64`, the native-AOT path) resolves one RID and is left alone. Try it end to end without touching the machine's global tools:
 
 ```bash
-dotnet tool install PaddleOcrSharp.Cli --version 26.8.1 \
+dotnet tool install PaddleOCR.Cli --version 26.8.1 \
   --add-source src/PaddleOcrSharp.Cli/bin/Release --tool-path /tmp/tool
 /tmp/tool/paddleocr-sharp
 ```

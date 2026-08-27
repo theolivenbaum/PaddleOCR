@@ -1,8 +1,8 @@
 # Builds the C# port under dotnet/ and publishes three packages to NuGet:
 #
-#   PaddleOcrSharp        the library
-#   PaddleOcrSharp.Pdf    PDF page rasterisation
-#   PaddleOcrSharp.Cli    the `paddleocr-sharp` .NET tool
+#   PaddleOCR        the library      (assembly PaddleOcrSharp)
+#   PaddleOCR.Pdf    PDF page rasterisation
+#   PaddleOCR.Cli    the `paddleocr-sharp` .NET tool
 #
 # Versioning is CalVer — yy.M.<build id mod 65536> — computed at run time, as in the other
 # Curiosity .NET repositories.

@@ -346,9 +346,10 @@ which swaps the red and blue weights and so decides which pixels of a formula su
 
 ## Publishing
 
-`.devops/build-nuget.yml` builds, tests and publishes on `main`: `PaddleOcrSharp`,
-`PaddleOcrSharp.Pdf`, and `PaddleOcrSharp.Cli` — the last as a .NET tool, so
-`dotnet tool install -g PaddleOcrSharp.Cli` puts `paddleocr-sharp` on the PATH. Versions are
+`.devops/build-nuget.yml` builds, tests and publishes on `main`: `PaddleOCR`, `PaddleOCR.Pdf`,
+and `PaddleOCR.Cli` — the last as a .NET tool, so `dotnet tool install -g PaddleOCR.Cli` puts
+`paddleocr-sharp` on the PATH. The package ids drop the `Sharp`; the assemblies and namespaces
+keep it, as `HNSW` and `HNSW.Net` do in the sibling repository. Versions are
 CalVer (`yy.M.<build id mod 65536>`), stamped by the pipeline; `Directory.Build.props` carries
 0.1.0 for local packs. The tool package is the project's publish output — that is how the
 SkiaSharp and PDFium native assets get in — so it is the one project `dotnet pack --no-build`

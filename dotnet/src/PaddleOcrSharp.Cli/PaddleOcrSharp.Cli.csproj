@@ -6,16 +6,16 @@
     <AssemblyName>paddleocr-sharp</AssemblyName>
   </PropertyGroup>
 
-  <!-- Shipped to NuGet as a .NET tool: `dotnet tool install -g PaddleOcrSharp.Cli` puts
+  <!-- Shipped to NuGet as a .NET tool: `dotnet tool install -g PaddleOCR.Cli` puts
        `paddleocr-sharp` on the PATH. PackAsTool publishes the project into the package, so the
        native assets SkiaSharp and PDFium bring along travel with it. -->
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>paddleocr-sharp</ToolCommandName>
-    <PackageId>PaddleOcrSharp.Cli</PackageId>
-    <Title>PaddleOcrSharp command-line tool</Title>
-    <Description>`paddleocr-sharp`, the command-line front-end to PaddleOcrSharp: parse pages of a PDF or an image to markdown and JSON, recognise a single cropped block, fetch the models, and benchmark the stages. Pure C#, no ONNX Runtime and no Paddle Inference.</Description>
+    <PackageId>PaddleOCR.Cli</PackageId>
+    <Title>PaddleOCR for .NET — command-line tool</Title>
+    <Description>`paddleocr-sharp`, the command-line front-end to the PaddleOCR .NET library: parse pages of a PDF or an image to markdown and JSON, recognise a single cropped block, fetch the models, and benchmark the stages. Pure C#, no ONNX Runtime and no Paddle Inference.</Description>
     <!-- A tool runs on whatever runtime the machine has, which will not be exactly 10.0.x. -->
     <RollForward>Major</RollForward>
   </PropertyGroup>

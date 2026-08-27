@@ -1,13 +1,13 @@
-# PaddleOcrSharp
+# PaddleOCR for .NET
 
 **A pure C# port of the [PaddleOCR-VL-1.6](https://github.com/PaddlePaddle/PaddleOCR) document
 parsing pipeline.** It turns a PDF or an image into markdown and JSON — text, headings, tables,
 formulas, figures and reading order — on the CPU, with no ONNX Runtime, no Paddle Inference and
 no libtorch.
 
-[![NuGet](https://img.shields.io/nuget/v/PaddleOcrSharp.svg?label=PaddleOcrSharp)](https://www.nuget.org/packages/PaddleOcrSharp)
-[![NuGet](https://img.shields.io/nuget/v/PaddleOcrSharp.Pdf.svg?label=PaddleOcrSharp.Pdf)](https://www.nuget.org/packages/PaddleOcrSharp.Pdf)
-[![NuGet](https://img.shields.io/nuget/v/PaddleOcrSharp.Cli.svg?label=paddleocr-sharp)](https://www.nuget.org/packages/PaddleOcrSharp.Cli)
+[![NuGet](https://img.shields.io/nuget/v/PaddleOCR.svg?label=PaddleOCR)](https://www.nuget.org/packages/PaddleOCR)
+[![NuGet](https://img.shields.io/nuget/v/PaddleOCR.Pdf.svg?label=PaddleOCR.Pdf)](https://www.nuget.org/packages/PaddleOCR.Pdf)
+[![NuGet](https://img.shields.io/nuget/v/PaddleOCR.Cli.svg?label=paddleocr-sharp)](https://www.nuget.org/packages/PaddleOCR.Cli)
 [![License](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
 
 The tensor math, the model graphs, the tokenizer, the image pipeline and the weight loading are
@@ -18,18 +18,19 @@ too — they are the normative specification the port is checked against, line b
 
 | Package | What it is |
 | --- | --- |
-| [`PaddleOcrSharp`](https://www.nuget.org/packages/PaddleOcrSharp) | The library: tensors and SIMD kernels, the SigLIP vision tower, the ERNIE-4.5 decoder, the BPE tokenizer, the Paddle graph interpreter, the pipeline |
-| [`PaddleOcrSharp.Pdf`](https://www.nuget.org/packages/PaddleOcrSharp.Pdf) | PDF page rasterisation — the one native dependency (PDFium) |
-| [`PaddleOcrSharp.Cli`](https://www.nuget.org/packages/PaddleOcrSharp.Cli) | The `paddleocr-sharp` .NET tool |
+| [`PaddleOCR`](https://www.nuget.org/packages/PaddleOCR) | The library: tensors and SIMD kernels, the SigLIP vision tower, the ERNIE-4.5 decoder, the BPE tokenizer, the Paddle graph interpreter, the pipeline |
+| [`PaddleOCR.Pdf`](https://www.nuget.org/packages/PaddleOCR.Pdf) | PDF page rasterisation — the one native dependency (PDFium) |
+| [`PaddleOCR.Cli`](https://www.nuget.org/packages/PaddleOCR.Cli) | The `paddleocr-sharp` .NET tool |
 
 ```bash
-dotnet add package PaddleOcrSharp
-dotnet add package PaddleOcrSharp.Pdf     # only if you feed it PDFs
-dotnet tool install --global PaddleOcrSharp.Cli
+dotnet add package PaddleOCR
+dotnet add package PaddleOCR.Pdf     # only if you feed it PDFs
+dotnet tool install --global PaddleOCR.Cli
 ```
 
-Requires .NET 10. `net10.0` only — the port leans on `System.Numerics.Tensors`,
-`Vector512<T>` and `TensorPrimitives`.
+The assemblies and the namespaces are `PaddleOcrSharp`, which is what the port is called in the
+tree; the packages are the ones above. `net10.0` only — the port leans on
+`System.Numerics.Tensors`, `Vector512<T>` and `TensorPrimitives`.
 
 ## The command-line tool
 

@@ -4,8 +4,9 @@
     <RootNamespace>PaddleOcrSharp.Pdf</RootNamespace>
     <AssemblyName>PaddleOcrSharp.Pdf</AssemblyName>
     <IsPackable>true</IsPackable>
-    <PackageId>PaddleOcrSharp.Pdf</PackageId>
-    <Description>PDF page rasterisation for PaddleOcrSharp.</Description>
+    <PackageId>PaddleOCR.Pdf</PackageId>
+    <Title>PaddleOCR for .NET — PDF rasterisation</Title>
+    <Description>PDF page rasterisation for the PaddleOCR .NET library, so a document can be parsed a page at a time.</Description>
     <!-- Runs the trim and AOT analysers on every build, so a reflection-based API cannot creep
          in unnoticed: the CLI publishes with native AOT and must keep doing so. -->
     <IsAotCompatible>true</IsAotCompatible>
