@@ -6,7 +6,20 @@ namespace PaddleOcrSharp.Pipeline;
 /// <summary>A run of layout regions that are recognised as one image.</summary>
 /// <param name="Indices">Indices into the detection list, in order.</param>
 /// <param name="Alignments">One alignment per join; empty for a single-region group.</param>
-public readonly record struct BlockGroup(IReadOnlyList<int> Indices, IReadOnlyList<StackAlignment> Alignments);
+public readonly record struct BlockGroup(IReadOnlyList<int> Indices, IReadOnlyList<StackAlignment> Alignments)
+{
+    /// <summary>
+    /// The identifier every member of the group carries, or <see langword="null"/> when the
+    /// regions were never candidates for merging.
+    /// </summary>
+    /// <remarks>
+    /// <c>group_id</c>, which upstream sets to the index of the group's first block. A text
+    /// region that ends up alone still gets one — it went through the merger and came out a
+    /// group of one — whereas a figure, a table, or a run the aspect-ratio guard abandoned does
+    /// not.
+    /// </remarks>
+    public int? GroupId { get; init; }
+}
 
 /// <summary>
 /// Decides which adjacent text regions should be recognised together.
@@ -32,6 +45,11 @@ public readonly record struct BlockGroup(IReadOnlyList<int> Indices, IReadOnlyLi
 /// <para>
 /// A group whose stacked image would be more than three times taller than wide is abandoned:
 /// the native-resolution encoder would shrink such a strip until the text was unreadable.
+/// </para>
+/// <para>
+/// Grouping also settles the page's block order. The groups come back in the order upstream
+/// emits them, which is not detection order: a figure that sits between the two halves of a
+/// paragraph is emitted after both halves rather than between them.
 /// </para>
 /// </remarks>
 public static class BlockMerger
@@ -97,40 +115,67 @@ public static class BlockMerger
             runs.Add((current, alignments));
         }
 
+        // A run's members are consecutive among the mergeable regions but not among all of them:
+        // the figure a paragraph wraps around sits between them. Upstream walks the detection
+        // list, and on reaching a run's first region emits the whole run, then whatever
+        // unmergeable regions fell inside the run's span, then continues past the run's end. So a
+        // figure caught between the two halves of one paragraph comes out *after* both halves
+        // rather than between them, and that reordering reaches the markdown.
+        var runByStart = new Dictionary<int, (int End, List<int> Indices, List<StackAlignment> Alignments)>();
+        foreach ((List<int> indices, List<StackAlignment> runAlignments) in runs)
+        {
+            runByStart[indices[0]] = (indices[^1], indices, runAlignments);
+        }
+
         var groups = new List<BlockGroup>();
         var claimed = new HashSet<int>();
 
-        foreach ((List<int> indices, List<StackAlignment> runAlignments) in runs)
+        int cursor = 0;
+        while (cursor < regions.Count)
         {
-            if (indices.Count > 1 && IsTooTall(indices, sizes))
+            if (!runByStart.TryGetValue(cursor, out (int End, List<int> Indices, List<StackAlignment> Alignments) run)
+                || run.Indices.Any(claimed.Contains))
             {
-                foreach (int index in indices)
+                if (claimed.Add(cursor))
+                {
+                    groups.Add(new BlockGroup([cursor], []));
+                }
+
+                cursor++;
+                continue;
+            }
+
+            // The guard applies to every run, single-region ones included: a lone column narrow
+            // enough to trip it is abandoned the same way, which is what leaves it without a
+            // group identifier.
+            if (IsTooTall(run.Indices, sizes))
+            {
+                foreach (int index in run.Indices)
                 {
                     groups.Add(new BlockGroup([index], []));
                     claimed.Add(index);
                 }
-
-                continue;
             }
-
-            groups.Add(new BlockGroup(indices, runAlignments));
-            foreach (int index in indices)
+            else
             {
-                claimed.Add(index);
+                groups.Add(new BlockGroup(run.Indices, run.Alignments) { GroupId = run.Indices[0] });
+                foreach (int index in run.Indices)
+                {
+                    claimed.Add(index);
+                }
             }
+
+            for (int inner = cursor + 1; inner < run.End; inner++)
+            {
+                if (claimed.Add(inner))
+                {
+                    groups.Add(new BlockGroup([inner], []));
+                }
+            }
+
+            cursor = run.End + 1;
         }
 
-        // Regions that were never candidates keep their own group, and the whole list is put back
-        // into detection order so reading order survives the grouping.
-        for (int i = 0; i < regions.Count; i++)
-        {
-            if (!claimed.Contains(i))
-            {
-                groups.Add(new BlockGroup([i], []));
-            }
-        }
-
-        groups.Sort(static (left, right) => left.Indices[0].CompareTo(right.Indices[0]));
         return groups;
     }
 

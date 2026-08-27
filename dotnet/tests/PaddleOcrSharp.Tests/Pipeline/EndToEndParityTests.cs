@@ -12,6 +12,13 @@ namespace PaddleOcrSharp.Tests.Pipeline;
 /// Runs the whole pipeline on a page and compares its blocks against the upstream Python run.
 /// Fixtures come from <c>dotnet/tools/reference/dump_end_to_end.py</c>.
 /// </summary>
+/// <remarks>
+/// The dumper walks the detector's boxes itself rather than going through <c>merge_blocks</c>, so
+/// the fixture is in detection order and a page whose layout triggers a merge would not line up
+/// with the pipeline's own — merged — order. Grouping and the ordering it implies are compared
+/// against upstream separately, in <see cref="BlockMergeParityTests"/>; keep the pages here
+/// simple enough that the two orders coincide.
+/// </remarks>
 [Collection(CheckpointCollection.Name)]
 public class EndToEndParityTests(CheckpointFixture checkpoint)
 {

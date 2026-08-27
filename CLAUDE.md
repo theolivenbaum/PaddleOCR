@@ -214,8 +214,8 @@ named beside them:
 | Stage | Upstream |
 | --- | --- |
 | Drop overlapping regions, consulting their outlines | `filter_overlap_boxes` |
-| Stack a paragraph split across columns into one image | `merge_blocks`, `merge_images` |
-| Trim a formula's margins, upscale a small spotting crop | `crop_margin`, `pre_process_for_spotting` |
+| Stack a paragraph split across columns into one image, and reorder around it | `merge_blocks`, `merge_images` |
+| Stretch a formula crop's contrast and trim its margins, upscale a small spotting crop | `crop_margin`, `pre_process_for_spotting` |
 | Cover figures inside a table with `[Fn]` placeholders and put them back afterwards | `tokenize_figure_of_table`, `untokenize_figure_of_table` |
 | Cut runaway repetition out of a block's output | `truncate_repetitive_content` |
 | OTSL markup to HTML | `convert_otsl_to_html` |
@@ -229,9 +229,10 @@ Three places diverge from upstream on purpose, and each says so where it is impl
 token glyphs painted over a table's figures (SkiaSharp, not OpenCV's Hershey font), the
 clustering behind heading levels (an exact one-dimensional k-means, not scikit-learn's seeded
 local search), and the shuffle that assigns those token numbers (a stable bijection, not
-Python's Mersenne Twister). One upstream quirk is reproduced rather than repaired — the doubled
-quote in `untokenize_figure_of_table`'s `alt` attribute — because it is what lands in a
-consumer's HTML.
+Python's Mersenne Twister). Two upstream quirks are reproduced rather than repaired, because both
+decide what a consumer actually gets: the doubled quote in `untokenize_figure_of_table`'s `alt`
+attribute, and `crop_margin` asking OpenCV for a BGR-to-grey conversion of a buffer that is RGB,
+which swaps the red and blue weights and so decides which pixels of a formula survive the trim.
 
 ## Working agreements for this port
 

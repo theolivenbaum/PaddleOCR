@@ -67,6 +67,8 @@ agree without further configuration.
 | `dump_markdown.py` | `markdown.npz` | `MarkdownConverter` over every label, in six settings combinations |
 | `dump_table_merge.py` | `table_merge.npz` | `merge_table.py`'s decisions and merged HTML for eleven page pairs |
 | `dump_title_levels.py` | `title_levels.npz` | `title_level.py`'s numbering styles, text heights, clustering and final levels |
+| `dump_block_merge.py` | `block_merge.npz` | `merge_blocks` grouping, ordering and `merge_images` pixels over ten layouts |
+| `dump_pipeline_helpers.py` | `pipeline_helpers.npz` | `filter_overlap_boxes`, `convert_otsl_to_html`, `truncate_repetitive_content` and `crop_margin` over thirty-eight cases |
 
 Run them from this directory:
 
@@ -81,6 +83,22 @@ being ported, which is the point.
 
 They need `shapely`, `beautifulsoup4`, `scikit-learn` and `colorlog` on top of the model
 dependencies; `pip install` them if a dumper reports one missing.
+
+## Running the whole Python pipeline beside the port
+
+`compare_with_upstream.py` is not a fixture generator. It builds the genuine
+`PaddleOCR-VL-1.6` pipeline — the shipped `paddlex/configs/pipelines/PaddleOCR-VL-1.6.yaml`,
+rewritten only to point each sub-model at the local checkout — runs it over three rendered
+pages, and writes each page's markdown and `parsing_res_list` next to the page itself:
+
+```bash
+pip install --no-compile --ignore-installed PyYAML -e "/home/user/ref/PaddleX[ocr]"
+COMPARE_DIR=/tmp/compare python3 compare_with_upstream.py
+paddleocr-sharp parse /tmp/compare/report.png --output /tmp/compare
+```
+
+That needs PaddleX importable rather than exec'd, since the whole pipeline is what is being run.
+The output is what the side-by-side comparison of the two implementations is built from.
 
 ## Debugging a mismatch
 

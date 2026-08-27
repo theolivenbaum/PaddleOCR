@@ -50,7 +50,9 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] Bicubic resample matching PIL/`torchvision` (a = −0.5, antialias behaviour verified)
 - [x] Rescale + normalize + HWC→CHW, fused and vectorised
 - [x] Patchify to `(grid_h*grid_w, 3, 14, 14)` and grid-THW computation
-- [x] `crop_margin`, seal/spotting pre-processing helpers
+- [x] `crop_margin` — the contrast stretch before the threshold, and OpenCV's grey weights
+      landing on an RGB buffer, both checked against upstream over seven crops — plus the
+      seal and spotting pre-processing helpers
 - [x] Parity tests vs. Python `image_processing_paddleocr_vl.PaddleOCRVLImageProcessor`
 
 ## 5. Vision tower — `src/PaddleOcrSharp/Models/Vision`
@@ -109,18 +111,23 @@ orientation classifier.*
 
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`
 
-- [x] Layout box filtering (`filter_overlap_boxes`) and merge modes (`union` / `large`)
-- [x] Block cropping, adjacent-block merging (`merge_blocks`)
+- [x] Layout box filtering (`filter_overlap_boxes`) and merge modes (`union` / `large`),
+      checked against the upstream function over thirteen layouts
+- [x] Block cropping, adjacent-block merging and the reordering it implies (`merge_blocks`,
+      `merge_images`), checked against the upstream functions over ten layouts
 - [x] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
       `Chart Recognition:`, `Seal Recognition:`, `Spotting:` with per-label pixel budgets
 - [x] Table figure tokenisation / untokenisation (`tokenize_figure_of_table`)
 - [x] Per-label pixel budgets, configurable the way upstream's `vlm_kwargs` are (`BlockPixelBudgets`)
-- [ ] Batch VL recognition across blocks. Upstream groups by pixel budget and hands each group to
-      the model at once; on our CPU path a group is still one image at a time — vision attention is
-      block-diagonal per image, so a batch is arithmetically a sequence. Grouping only becomes
-      worthwhile alongside a batched vision pass.
-- [x] OTSL → HTML table conversion
-- [x] Repetition truncation (`truncate_repetitive_content`)
+- [x] Block batching, matching the backend being ported. The pipeline's VLM worker gathers boxes
+      up to `vl_rec_model.batch_sampler.batch_size`, but the *local* predictor pins that to
+      `PADDLEOCR_VL_LOCAL_BATCH_SIZE = 1` and warns if asked for more
+      (`inference/models/doc_vlm/{constants,predictor}.py`) — batching above one belongs to the
+      vLLM/SGLang back-ends, which are out of scope. One block at a time is therefore what the
+      ported backend does, and it costs nothing: vision attention is block-diagonal per image, so
+      a batch is arithmetically a sequence.
+- [x] OTSL → HTML table conversion, checked against `convert_otsl_to_html` over ten tables
+- [x] Repetition truncation, checked against `truncate_repetitive_content` over eight outputs
 - [x] Spotting `<|LOC_n|>` post-processing
 - [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
 - [x] JSON carries `block_order`, `group_id`, `title_level` and `block_polygon_points`;

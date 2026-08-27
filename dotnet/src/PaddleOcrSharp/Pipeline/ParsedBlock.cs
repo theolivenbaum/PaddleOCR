@@ -20,12 +20,14 @@ public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, in
     public int? Order { get; init; }
 
     /// <summary>
-    /// Identifies the blocks that were stacked into one image before recognition, or
-    /// <see langword="null"/> for a block that stands alone.
+    /// Identifies the blocks that were considered together before recognition, or
+    /// <see langword="null"/> for a block the merger never looked at.
     /// </summary>
     /// <remarks>
     /// <c>group_id</c>: the index of the group's first block, carried by every member, so a
-    /// consumer can tell that a paragraph split across two columns is one paragraph.
+    /// consumer can tell that a paragraph split across two columns is one paragraph. A text
+    /// block that came out of the merger alone still gets one; a figure, a table, or a run the
+    /// aspect-ratio guard abandoned does not.
     /// </remarks>
     public int? GroupId { get; init; }
 

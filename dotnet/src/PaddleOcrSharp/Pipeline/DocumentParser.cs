@@ -1,3 +1,4 @@
+using System.Buffers;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
 using PaddleOcrSharp.Models.Layout;
@@ -153,9 +154,13 @@ public sealed class DocumentParser : IDisposable
             }
 
             IReadOnlyCollection<string> nonMergeLabels = NonMergeLabels(settings);
-            List<BlockGroup> groups = settings.MergeLayoutBlocks && regions.Count > 1
+            List<BlockGroup> groups = settings.MergeLayoutBlocks
                 ? BlockMerger.Group(regions, sizes, nonMergeLabels)
                 : [.. Enumerable.Range(0, regions.Count).Select(i => new BlockGroup([i], []))];
+
+            // Grouping is also what settles the page's block order: a region caught inside a
+            // merged run's span is emitted after the run, not in its original position.
+            int[] emission = [.. groups.SelectMany(group => group.Indices)];
 
             var blocks = new ParsedBlock[regions.Count];
             var tokenizedByBlock = new IReadOnlyList<TokenizedFigure>?[regions.Count];
@@ -191,11 +196,8 @@ public sealed class DocumentParser : IDisposable
 
                 try
                 {
-                    blocks[primary] = Recognize(prepared, region, settings, cancellationToken);
-                    if (group.Indices.Count > 1)
-                    {
-                        blocks[primary] = blocks[primary] with { GroupId = primary };
-                    }
+                    blocks[primary] = Recognize(prepared, region, settings, cancellationToken)
+                        with { GroupId = group.GroupId };
                 }
                 finally
                 {
@@ -220,7 +222,7 @@ public sealed class DocumentParser : IDisposable
                     LayoutBox other = regions[index].ClampTo(page.Width, page.Height);
                     blocks[index] = new ParsedBlock(other.Label, other, string.Empty, other.ReadingOrder)
                     {
-                        GroupId = primary,
+                        GroupId = group.GroupId,
                     };
                 }
 
@@ -266,9 +268,14 @@ public sealed class DocumentParser : IDisposable
 
             // Figures that a table absorbed are described inside its HTML, so they no longer
             // belong to the page as separate blocks.
-            IReadOnlyList<ParsedBlock> retained = absorbed.Count == 0
-                ? blocks
-                : [.. blocks.Where(block => block.ImagePath is null || !absorbed.Contains(block.ImagePath))];
+            IReadOnlyList<ParsedBlock> retained =
+            [
+                .. emission
+                    .Select(index => blocks[index])
+                    .Where(block => absorbed.Count == 0
+                        || block.ImagePath is null
+                        || !absorbed.Contains(block.ImagePath)),
+            ];
 
             return new ParsedPage(pageIndex, page.Width, page.Height, BlockOrder.Assign(retained, settings.Markdown.IgnoredLabels));
         }
@@ -526,39 +533,99 @@ public sealed class DocumentParser : IDisposable
     /// <summary>
     /// Trims uniform margins from a formula crop so the model sees the glyphs at a useful scale.
     /// </summary>
-    /// <remarks>Port of <c>crop_margin</c>; the crop is skipped when it would leave nothing.</remarks>
-    private static RgbImage CropMargin(RgbImage image)
+    /// <remarks>
+    /// <para>
+    /// Port of <c>crop_margin</c>, and of the <c>w &gt; 2 and h &gt; 2</c> test the caller applies
+    /// to its result: a crop thinner than three pixels either way is discarded and the untrimmed
+    /// region used instead.
+    /// </para>
+    /// <para>
+    /// The grey is stretched to the full range before the threshold, so what counts as background
+    /// depends on the crop's own contrast rather than on an absolute level — a faint formula on a
+    /// grey ground is trimmed just as a black one on white is.
+    /// </para>
+    /// </remarks>
+    internal static RgbImage CropMargin(RgbImage image)
     {
-        int left = image.Width;
-        int right = -1;
-        int top = image.Height;
-        int bottom = -1;
+        int count = image.Width * image.Height;
+        byte[] grey = ArrayPool<byte>.Shared.Rent(count);
 
-        for (int y = 0; y < image.Height; y++)
+        try
         {
-            ReadOnlySpan<byte> row = image.Row(y);
-            for (int x = 0; x < image.Width; x++)
+            int minimum = 255;
+            int maximum = 0;
+
+            for (int y = 0; y < image.Height; y++)
             {
-                int offset = x * 3;
-                int luminance = (row[offset] + row[offset + 1] + row[offset + 2]) / 3;
-                if (luminance >= 200)
+                ReadOnlySpan<byte> row = image.Row(y);
+                int at = y * image.Width;
+
+                for (int x = 0; x < image.Width; x++)
                 {
-                    continue;
+                    int offset = x * 3;
+
+                    // OpenCV's fixed-point BGR-to-grey, applied — as upstream applies it — to a
+                    // buffer that is actually RGB, so red carries the blue weight and blue the
+                    // red one. Reproduced rather than repaired: it decides which pixels the
+                    // threshold keeps, and the model is fed whatever it decides.
+                    int value = ((row[offset] * 1868)
+                        + (row[offset + 1] * 9617)
+                        + (row[offset + 2] * 4899)
+                        + 8192) >> 14;
+
+                    grey[at + x] = (byte)value;
+                    minimum = Math.Min(minimum, value);
+                    maximum = Math.Max(maximum, value);
                 }
-
-                left = Math.Min(left, x);
-                right = Math.Max(right, x);
-                top = Math.Min(top, y);
-                bottom = Math.Max(bottom, y);
             }
-        }
 
-        if (right < 0 || right - left <= 2 || bottom - top <= 2)
+            if (maximum == minimum)
+            {
+                return image.Clone();
+            }
+
+            Span<byte> stretched = stackalloc byte[256];
+            double range = maximum - minimum;
+            for (int value = minimum; value <= maximum; value++)
+            {
+                stretched[value] = (byte)(int)((value - minimum) / range * 255d);
+            }
+
+            int left = image.Width;
+            int right = -1;
+            int top = image.Height;
+            int bottom = -1;
+
+            for (int y = 0; y < image.Height; y++)
+            {
+                int at = y * image.Width;
+                for (int x = 0; x < image.Width; x++)
+                {
+                    // `THRESH_BINARY_INV` keeps everything at or below the threshold, so the
+                    // comparison is strictly greater rather than the other way round.
+                    if (stretched[grey[at + x]] > 200)
+                    {
+                        continue;
+                    }
+
+                    left = Math.Min(left, x);
+                    right = Math.Max(right, x);
+                    top = Math.Min(top, y);
+                    bottom = Math.Max(bottom, y);
+                }
+            }
+
+            if (right < 0 || right - left + 1 <= 2 || bottom - top + 1 <= 2)
+            {
+                return image.Clone();
+            }
+
+            return image.Crop(left, top, right + 1, bottom + 1);
+        }
+        finally
         {
-            return image.Clone();
+            ArrayPool<byte>.Shared.Return(grey);
         }
-
-        return image.Crop(left, top, right + 1, bottom + 1);
     }
 
     private static LayoutBox WholePage(RgbImage page, string label) =>
