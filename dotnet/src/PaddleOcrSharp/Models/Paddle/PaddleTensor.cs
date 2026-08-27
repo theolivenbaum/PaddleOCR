@@ -192,26 +192,14 @@ public sealed class PaddleTensor
             if (dtype == PaddleDType.Bool)
             {
                 PaddleTensor booleans = Int(Shape, dtype);
-                ReadOnlySpan<long> source = IntSpan;
-                Span<long> destination = booleans.IntSpan;
-                for (int i = 0; i < source.Length; i++)
-                {
-                    destination[i] = source[i] != 0 ? 1 : 0;
-                }
-
+                Normalize(IntSpan, booleans.IntSpan);
                 return booleans;
             }
 
             if (dtype == PaddleDType.Int32)
             {
                 PaddleTensor narrowed = Int(Shape, dtype);
-                ReadOnlySpan<long> source = IntSpan;
-                Span<long> destination = narrowed.IntSpan;
-                for (int i = 0; i < source.Length; i++)
-                {
-                    destination[i] = (int)source[i];
-                }
-
+                Truncate(IntSpan, narrowed.IntSpan);
                 return narrowed;
             }
 
@@ -221,13 +209,7 @@ public sealed class PaddleTensor
         if (dtype.IsFloat())
         {
             PaddleTensor floats = Float(Shape, dtype);
-            ReadOnlySpan<long> source = IntSpan;
-            Span<float> destination = floats.FloatSpan;
-            for (int i = 0; i < source.Length; i++)
-            {
-                destination[i] = source[i];
-            }
-
+            Widen(IntSpan, floats.FloatSpan);
             return floats;
         }
 
@@ -237,17 +219,11 @@ public sealed class PaddleTensor
 
         if (dtype == PaddleDType.Bool)
         {
-            for (int i = 0; i < values.Length; i++)
-            {
-                results[i] = values[i] != 0f ? 1 : 0;
-            }
+            Normalize(values, results);
         }
         else
         {
-            for (int i = 0; i < values.Length; i++)
-            {
-                results[i] = (long)values[i];
-            }
+            Narrow(values, results);
         }
 
         return integers;
@@ -267,6 +243,110 @@ public sealed class PaddleTensor
         }
 
         return copy;
+    }
+
+
+    /// <summary>Writes 1 where the source is non-zero and 0 elsewhere.</summary>
+    /// <remarks>
+    /// The mask head casts twelve-million-element tensors, which is enough that the scalar loop
+    /// these replace was one of the layout graph's larger line items. Comparing against zero and
+    /// keeping the all-ones result as a mask gives the same answer with no branch per element.
+    /// </remarks>
+    private static void Normalize(ReadOnlySpan<long> source, Span<long> destination)
+    {
+        int i = 0;
+
+        // Fully qualified: this type has its own Vector member, which otherwise shadows the one
+        // in System.Numerics.
+        if (System.Numerics.Vector.IsHardwareAccelerated)
+        {
+            var one = new System.Numerics.Vector<long>(1L);
+            System.Numerics.Vector<long> zero = System.Numerics.Vector<long>.Zero;
+            int lanes = System.Numerics.Vector<long>.Count;
+
+            for (; i <= source.Length - lanes; i += lanes)
+            {
+                System.Numerics.Vector<long> value = System.Numerics.Vector.LoadUnsafe(in source[i]);
+                System.Numerics.Vector<long> mapped = System.Numerics.Vector
+                    .ConditionalSelect(System.Numerics.Vector.Equals(value, zero), zero, one);
+                System.Numerics.Vector.StoreUnsafe(mapped, ref destination[i]);
+            }
+        }
+
+        for (; i < source.Length; i++)
+        {
+            destination[i] = source[i] != 0 ? 1 : 0;
+        }
+    }
+
+    /// <inheritdoc cref="Normalize(ReadOnlySpan{long}, Span{long})" />
+    /// <remarks>
+    /// This is the direction the mask head takes — a float logit tensor to a boolean — and the
+    /// one the layout graph spends most of its casting time in. Each input vector produces two
+    /// output vectors, because a boolean is stored in the same 64-bit lane an integer would use.
+    /// </remarks>
+    private static void Normalize(ReadOnlySpan<float> source, Span<long> destination)
+    {
+        int i = 0;
+
+        if (System.Numerics.Vector.IsHardwareAccelerated
+            && source.Length >= System.Numerics.Vector<float>.Count)
+        {
+            System.Numerics.Vector<float> zero = System.Numerics.Vector<float>.Zero;
+            System.Numerics.Vector<int> ones = System.Numerics.Vector<int>.One;
+            System.Numerics.Vector<int> zeros = System.Numerics.Vector<int>.Zero;
+            int lanes = System.Numerics.Vector<float>.Count;
+            int half = lanes / 2;
+
+            for (; i <= source.Length - lanes; i += lanes)
+            {
+                System.Numerics.Vector<float> value = System.Numerics.Vector.LoadUnsafe(in source[i]);
+                System.Numerics.Vector<int> isZero =
+                    System.Numerics.Vector.AsVectorInt32(System.Numerics.Vector.Equals(value, zero));
+                System.Numerics.Vector<int> mapped =
+                    System.Numerics.Vector.ConditionalSelect(isZero, zeros, ones);
+
+                System.Numerics.Vector.Widen(
+                    mapped,
+                    out System.Numerics.Vector<long> low,
+                    out System.Numerics.Vector<long> high);
+
+                System.Numerics.Vector.StoreUnsafe(low, ref destination[i]);
+                System.Numerics.Vector.StoreUnsafe(high, ref destination[i + half]);
+            }
+        }
+
+        for (; i < source.Length; i++)
+        {
+            destination[i] = source[i] != 0f ? 1 : 0;
+        }
+    }
+
+    /// <summary>Truncates each value to 32 bits, keeping the 64-bit storage.</summary>
+    private static void Truncate(ReadOnlySpan<long> source, Span<long> destination)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            destination[i] = (int)source[i];
+        }
+    }
+
+    /// <summary>Converts integers to float32.</summary>
+    private static void Widen(ReadOnlySpan<long> source, Span<float> destination)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            destination[i] = source[i];
+        }
+    }
+
+    /// <summary>Truncates floats towards zero into 64-bit integers.</summary>
+    private static void Narrow(ReadOnlySpan<float> source, Span<long> destination)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            destination[i] = (long)source[i];
+        }
     }
 
     /// <summary>Materialises a parameter from a memory-mapped weight file.</summary>

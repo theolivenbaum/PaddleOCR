@@ -179,31 +179,126 @@ Tests that need fixtures are skipped, not failed, when the fixture directory is 
 
 ## Where the time goes
 
-Measured with `paddleocr-sharp bench` on 4 cores (AVX-512), a 980x392 page (1960 patches).
-`--no-vl` and `--no-layout` time the halves separately, which is what the layout figure needs —
-run together, the two compete for the same cache.
+`paddleocr-sharp bench` starts by measuring the machine, before it loads anything: the FMA rate
+the hardware sustains at each vector width, at one thread and at every thread, and the read
+bandwidth at each level of the hierarchy. A shared virtual machine is not a constant — the core
+count is whatever the hypervisor schedules, the clock moves with the host's AVX-512 licence state,
+and a noisy neighbour halves the memory bandwidth between one run and the next. Absolute
+milliseconds from different days are not comparable, so the run prints its own ceilings and the
+per-sample spread beside every figure, and `--gemm true` reports each GEMM shape as a fraction of
+the ceiling just measured. On the reference machine that spread runs from 10% to 40%, which is
+wider than most differences worth acting on: nothing below was accepted without an A/B in one
+sitting, with an untouched operator alongside it as a control.
+
+Measured on 4 cores at ~3 GHz, a 980x392 page (1960 patches).
 
 | Stage | Cost |
 | --- | --- |
 | Vision tower (1960 patches) | ~16 s |
 | Decoder (503-token prefill + 32 tokens) | ~3.6 s |
-| Layout graph | ~5.2 s |
+| Layout graph | ~7.6 s |
 
-Both halves are GEMM-bound, and the shape of the win is the same in each: give the inner loop
-enough reuse that it is compute-bound rather than load-bound. `Gemm.Linear` widens a bf16 column
-panel once and reuses it across every activation row; `Gemm.MatMul` tiles the output and picks
-its kernel from the operand layout; attention blocks 16 query rows at a time so the keys and
+### Against the original
+
+The port is faster than the pipeline it was ported from. Running upstream's own
+`PaddleOCRVL16Pipeline` and this library over the same three pages, back to back on the same
+machine, at each side's defaults:
+
+| Page | Python | C# | |
+| --- | --- | --- | --- |
+| report (4 blocks) | 62.1 s | 33.6 s | 1.85x |
+| benchmark (3 blocks, one table) | 49.7 s | 23.2 s | 2.14x |
+| lines (1 block) | 20.1 s | 11.5 s | 1.75x |
+| **total** | **131.9 s** | **68.3 s** | **1.93x** |
+
+The markdown is byte-identical on all three, so this is the same work done in less time rather
+than less work. Both sides use the whole machine: upstream threads inside oneDNN and Paddle, and
+this port inside its own GEMM. `--block-concurrency 4` takes the total to about 59 s by
+recognising blocks in parallel as well, at the cost of holding several blocks' activations at
+once; it is not the default.
+
+Two caveats on that table. Loading the checkpoint is excluded on both sides — cold, the first
+memory-mapped read of the 0.9B weights costs around 97 s here and is entirely page-cache traffic,
+which is what an earlier and much less flattering comparison had accidentally folded into the C#
+column. And the machine moves: the same Python run measured 123.5 s a few days earlier against
+131.9 s here, which is why both sides are always measured in one sitting.
+
+Both model halves are GEMM-bound, and the shape of the win is the same in each: give the inner
+loop enough reuse that it is compute-bound rather than load-bound. `Gemm.Linear` widens a bf16
+column panel once and reuses it across every activation row; `Gemm.MatMul` tiles the output and
+picks its kernel from the operand layout; attention blocks 16 query rows at a time so the keys and
 values stay in cache across the block; the convolution treats an output row as one GEMM against
 its im2col columns rather than a dot product per output pixel.
 
-`PirProfile` (printed by `bench`) reports each operator's total, its slowest single call, and
-that call's result shape and Paddle module path. The shape column is what makes the layout
-graph's cost legible — nearly a fifth of it is element-wise work on the mask head's
-`[1, 300, 200, 200]` tensors, not the convolutions.
+The layout graph is not GEMM-bound, and for a while it was not bound by anything defensible. The
+mask head works on `[1, 300, 200, 200]` tensors — twelve million elements — and its casts,
+comparisons and fills ran element at a time. Vectorising them took the stage from 9.3 s to 7.6 s
+with `conv2d` flat as a control, and moved the convolutions from a fifth of the graph to a third,
+which is where the remaining work is.
 
-Not every plausible idea survives measurement: banding `Gemm.Linear` over activation rows, so a
-band stays cached across all the column panels, is a clear win on paper and was consistently
-slower in practice. The panel loop's traffic is evidently already absorbed by the shared cache.
+`PirProfile` (printed by `bench`) reports each operator's total, its slowest single call, and that
+call's result shape and Paddle module path. The shape column is what makes the layout graph's cost
+legible.
+
+### Where the vision tower's time goes
+
+`bench` prints a stage profile for the tower (`StageProfile`, the hand-written towers' answer to
+`PirProfile`). For the same 980x392 page:
+
+| Stage | Share |
+| --- | --- |
+| attention | 44% |
+| MLP matrix products | 32% |
+| QKV projections | 13% |
+| output projection | 4% |
+| rotary + head shuffles, GELU, norms, residuals | 7% |
+
+Attention carries under a quarter of the tower's arithmetic and takes nearly half its time: about
+65 GFLOP/s against the 196 the large matrix products reach. That is the one place left where the
+gap to the hardware is structural rather than incremental — the score product has an inner
+dimension of 72, which is too short for a kernel that reduces along it. A flash-attention-shaped
+rewrite, tiling over keys with a running maximum, is the way in.
+
+It is not, however, key and value traffic, which was the first guess: every row-block re-reads
+this head's keys and values, 123 times over at the sixteen-row block used, and sizing the block
+from the token count instead so that halved made no measurable difference.
+
+### Things that looked like wins and were not
+
+Each of these is a plausible optimisation that the benchmark rejected. They are recorded because
+the argument for them is still convincing on paper, and someone will otherwise try them again.
+
+- **Banding `Gemm.Linear` over activation rows**, so a band stays cached across all the column
+  panels. Consistently slower; the panel loop's traffic is evidently already absorbed by the
+  shared cache.
+- **Interleaving the weight panel** so the kernel's four weight loads are consecutive rather than
+  four streams a row apart. Neutral at best and a 40% loss if the row-major copy is kept alive
+  beside it, which doubles what each row-block sweeps through L2. The strides involved are not
+  powers of two, so the prefetcher was already handling them.
+- **Sizing attention's row-block from the token count**, so a page's keys and values are read
+  half as many times. No measurable change, which is what rules key and value bandwidth out as
+  attention's limit and points at the score product's short inner dimension instead.
+- **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
+  60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
+  GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit
+  the register file. See `Core/Simd.cs`; the override is left to whoever measures their own
+  machine.
+
+### Two traps that make a SIMD microbenchmark lie
+
+Both were hit while building the calibration above, and both report roughly a fifth of the truth
+while looking entirely reasonable.
+
+- **Accumulators that start equal.** Eight chains seeded to zero and updated identically are
+  provably the same value, so the JIT emits one `vfmadd231ps` reusing a single register. The loop
+  then measures FMA latency rather than throughput. Seed them differently.
+- **Consuming the result through a `volatile` field.** The release barrier makes the JIT keep
+  every SIMD local in the frame across the loop, so the body becomes load-operate-store and
+  reports store-forwarding throughput. `GC.KeepAlive` prevents dead-code elimination without
+  touching register allocation.
+
+A third, related: an indexed accumulator — an array or a `stackalloc` span — is never
+enregistered, so the chains have to be named locals.
 
 ## What the pipeline does beyond the models
 

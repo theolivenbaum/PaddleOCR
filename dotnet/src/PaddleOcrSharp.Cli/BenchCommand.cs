@@ -2,6 +2,7 @@ using System.Diagnostics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
+using PaddleOcrSharp.Models.Vision;
 using PaddleOcrSharp.Models.Layout;
 using PaddleOcrSharp.Models.Paddle;
 
@@ -18,14 +19,29 @@ public static class BenchCommand
         int iterations = Math.Max(1, command.GetInt("iterations", 3));
         bool benchmarkVL = command.GetBool("vl", true);
 
-        Console.WriteLine($"Threads: {Environment.ProcessorCount}  Vector512: {System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}");
+        // Before anything is loaded, and before the model work has had a chance to warm or
+        // pollute anything, find out what this machine will actually do today. Everything below
+        // is reported against these ceilings as well as in milliseconds.
+        MachineProfile? machine = command.GetBool("calibrate", true)
+            ? MachineProfile.Measure(command.GetFloat("calibrate-seconds", 1.6f))
+            : null;
 
-        var clock = Stopwatch.StartNew();
+        if (machine is not null)
+        {
+            Console.WriteLine(machine.Describe());
+            Console.WriteLine();
+        }
+
+        if (command.GetBool("gemm", false))
+        {
+            GemmBenchmark.Run(machine);
+        }
+
         using RgbImage source = Synthetic(width, height);
 
         if (benchmarkVL)
         {
-            await BenchmarkVLAsync(command, source, iterations).ConfigureAwait(false);
+            await BenchmarkVLAsync(command, source, iterations, machine).ConfigureAwait(false);
         }
 
         if (command.GetBool("layout", true))
@@ -37,7 +53,8 @@ public static class BenchCommand
     }
 
     /// <summary>Times the vision tower and the decoder.</summary>
-    private static async Task BenchmarkVLAsync(CommandLine command, RgbImage source, int iterations)
+    private static async Task BenchmarkVLAsync(
+        CommandLine command, RgbImage source, int iterations, MachineProfile? machine)
     {
         string directory = await ModelLocator
             .ResolveVLAsync(command, allowDownload: true)
@@ -57,9 +74,10 @@ public static class BenchCommand
 
         for (int i = 0; i < iterations; i++)
         {
+            var stages = i == iterations - 1 ? new StageProfile() : null;
             long before = GC.GetTotalAllocatedBytes(precise: true);
             clock.Restart();
-            using Tensor embeddings = model.Vision.Encode(preprocessed);
+            using Tensor embeddings = model.Vision.Encode(preprocessed, profile: stages);
             TimeSpan elapsed = clock.Elapsed;
             long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 
@@ -67,6 +85,13 @@ public static class BenchCommand
                 $"Vision  [{i}]: {elapsed.TotalMilliseconds:F0}ms " +
                 $"({preprocessed.Grid.PatchCount / elapsed.TotalSeconds:F0} patches/s, " +
                 $"{allocated / (1024.0 * 1024.0):F1} MiB allocated)");
+
+            if (stages is not null)
+            {
+                Console.WriteLine();
+                Console.WriteLine(stages);
+                Console.WriteLine();
+            }
         }
 
         int tokens = Math.Max(1, command.GetInt("tokens", 32));
