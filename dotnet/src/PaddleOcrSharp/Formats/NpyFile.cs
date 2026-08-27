@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Text;
 using PaddleOcrSharp.Core;
 
@@ -34,6 +35,25 @@ public readonly record struct NpyArray(DType Dtype, int[] Shape, byte[] Bytes)
                 DType.Int32 => BinaryPrimitives.ReadInt32LittleEndian(Bytes.AsSpan(i * 4, 4)),
                 _ => throw new InvalidOperationException($"Cannot read {Dtype} as int64."),
             };
+        }
+
+        return result;
+    }
+
+    /// <summary>Reads the array as float64 values, widening narrower float dtypes.</summary>
+    public double[] ToDoubles()
+    {
+        double[] result = new double[ElementCount];
+        if (Dtype == DType.Float64)
+        {
+            MemoryMarshal.Cast<byte, double>(Bytes).CopyTo(result);
+            return result;
+        }
+
+        float[] narrow = ToFloats();
+        for (int i = 0; i < result.Length; i++)
+        {
+            result[i] = narrow[i];
         }
 
         return result;
@@ -187,6 +207,7 @@ public static class NpyFile
     private static DType ParseDescriptor(string descriptor) => descriptor switch
     {
         "<f4" or "=f4" or "f4" => DType.Float32,
+        "<f8" or "=f8" or "f8" => DType.Float64,
         "<f2" or "=f2" or "f2" => DType.Float16,
         "<i8" or "=i8" or "i8" => DType.Int64,
         "<i4" or "=i4" or "i4" => DType.Int32,

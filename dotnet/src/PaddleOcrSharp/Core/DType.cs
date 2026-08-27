@@ -9,6 +9,9 @@ public enum DType
     /// <summary>IEEE-754 binary32.</summary>
     Float32,
 
+    /// <summary>IEEE-754 binary64. Reference fixtures use it; no model weight does.</summary>
+    Float64,
+
     /// <summary>IEEE-754 binary16.</summary>
     Float16,
 
@@ -38,6 +41,7 @@ public static class DTypeExtensions
     public static int ByteSize(this DType dtype) => dtype switch
     {
         DType.Float32 => 4,
+        DType.Float64 => 8,
         DType.Float16 => 2,
         DType.BFloat16 => 2,
         DType.Int64 => 8,

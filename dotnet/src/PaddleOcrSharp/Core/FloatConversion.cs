@@ -118,6 +118,16 @@ public static class FloatConversion
             case DType.Float32:
                 MemoryMarshal.Cast<byte, float>(source).CopyTo(destination);
                 break;
+            case DType.Float64:
+            {
+                ReadOnlySpan<double> values = MemoryMarshal.Cast<byte, double>(source);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    destination[i] = (float)values[i];
+                }
+
+                break;
+            }
             case DType.BFloat16:
                 BF16ToFloat(MemoryMarshal.Cast<byte, ushort>(source), destination);
                 break;

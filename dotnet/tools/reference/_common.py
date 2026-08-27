@@ -29,6 +29,20 @@ def fixture_path(name: str) -> pathlib.Path:
     return FIXTURE_DIR / name
 
 
+def save_exact(name: str, **arrays) -> pathlib.Path:
+    """Writes fixtures without narrowing float64.
+
+    `save` narrows because model tensors are float32 anyway and the fixtures are large. The
+    geometry references are neither: they are a handful of numbers whose last digits are exactly
+    what the C# side is being checked against.
+    """
+    path = fixture_path(name)
+    cleaned = {k: np.ascontiguousarray(np.asarray(v)) for k, v in arrays.items()}
+    np.savez(path, **cleaned)
+    print(f"wrote {path} ({', '.join(f'{k}{list(v.shape)}' for k, v in cleaned.items())})")
+    return path
+
+
 def save(name: str, **arrays) -> pathlib.Path:
     path = fixture_path(name)
     cleaned = {}
