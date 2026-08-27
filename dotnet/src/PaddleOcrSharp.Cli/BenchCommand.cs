@@ -18,14 +18,29 @@ public static class BenchCommand
         int iterations = Math.Max(1, command.GetInt("iterations", 3));
         bool benchmarkVL = command.GetBool("vl", true);
 
-        Console.WriteLine($"Threads: {Environment.ProcessorCount}  Vector512: {System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}");
+        // Before anything is loaded, and before the model work has had a chance to warm or
+        // pollute anything, find out what this machine will actually do today. Everything below
+        // is reported against these ceilings as well as in milliseconds.
+        MachineProfile? machine = command.GetBool("calibrate", true)
+            ? MachineProfile.Measure(command.GetFloat("calibrate-seconds", 1.6f))
+            : null;
 
-        var clock = Stopwatch.StartNew();
+        if (machine is not null)
+        {
+            Console.WriteLine(machine.Describe());
+            Console.WriteLine();
+        }
+
+        if (command.GetBool("gemm", false))
+        {
+            GemmBenchmark.Run(machine);
+        }
+
         using RgbImage source = Synthetic(width, height);
 
         if (benchmarkVL)
         {
-            await BenchmarkVLAsync(command, source, iterations).ConfigureAwait(false);
+            await BenchmarkVLAsync(command, source, iterations, machine).ConfigureAwait(false);
         }
 
         if (command.GetBool("layout", true))
@@ -37,7 +52,8 @@ public static class BenchCommand
     }
 
     /// <summary>Times the vision tower and the decoder.</summary>
-    private static async Task BenchmarkVLAsync(CommandLine command, RgbImage source, int iterations)
+    private static async Task BenchmarkVLAsync(
+        CommandLine command, RgbImage source, int iterations, MachineProfile? machine)
     {
         string directory = await ModelLocator
             .ResolveVLAsync(command, allowDownload: true)

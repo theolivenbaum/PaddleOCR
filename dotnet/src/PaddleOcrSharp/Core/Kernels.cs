@@ -39,7 +39,7 @@ public static class Kernels
         int length = source.Length;
         int i = 0;
 
-        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> v0 = Vector256.Create(s0);
             Vector256<float> v1 = Vector256.Create(s1);
@@ -72,7 +72,7 @@ public static class Kernels
         int length = destination.Length;
         int i = 0;
 
-        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> scaleVector = Vector256.Create(scale);
             for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
@@ -105,7 +105,7 @@ public static class Kernels
         int length = values.Length;
         int i = 0;
 
-        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> one = Vector256.Create(1f);
             for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
@@ -144,7 +144,7 @@ public static class Kernels
         int length = values.Length;
         int i = 0;
 
-        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> half = Vector256.Create(0.5f);
             Vector256<float> one = Vector256.Create(1f);
@@ -194,7 +194,7 @@ public static class Kernels
         float sum = 0f;
         int index = 0;
 
-        if (Vector256.IsHardwareAccelerated && values.Length >= Vector256<float>.Count)
+        if (Simd.Use256 && values.Length >= Vector256<float>.Count)
         {
             Vector256<float> shift = Vector256.Create(max);
             Vector256<float> total = Vector256<float>.Zero;

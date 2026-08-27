@@ -61,6 +61,14 @@ public static class Help
               --tokens <n>               Tokens to decode per iteration (default: 32)
               --no-vl                    Skip the vision tower and decoder
               --no-layout                Skip the layout graph
+              --gemm true                Sweep the GEMM shapes the model issues
+              --calibrate false          Skip the machine measurement that heads the run
+              --calibrate-seconds <f>    Time to spend measuring the machine (default: 4)
+
+            Every run begins by measuring this machine — FMA rate at each vector width, cache and
+            memory bandwidth, and the spread across samples — because stage times from a shared
+            host are not comparable between runs without it. PADDLEOCR_SHARP_VECTOR_BITS=256|512
+            overrides the vector width the kernels choose.
             """);
 
         return 0;

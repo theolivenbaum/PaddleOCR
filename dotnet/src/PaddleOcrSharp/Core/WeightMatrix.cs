@@ -162,7 +162,7 @@ public readonly struct WeightMatrix
         int i = 0;
         float sum = 0f;
 
-        if (Vector256.IsHardwareAccelerated && length >= 16)
+        if (Simd.Use256 && length >= 16)
         {
             Vector256<float> acc0 = Vector256<float>.Zero;
             Vector256<float> acc1 = Vector256<float>.Zero;
@@ -213,7 +213,7 @@ public readonly struct WeightMatrix
         int i = 0;
         float s0 = 0f, s1 = 0f, s2 = 0f, s3 = 0f;
 
-        if (Vector256.IsHardwareAccelerated && length >= 16)
+        if (Simd.Use256 && length >= 16)
         {
             Vector256<float> v0 = Vector256<float>.Zero;
             Vector256<float> v1 = Vector256<float>.Zero;

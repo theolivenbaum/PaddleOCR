@@ -277,7 +277,7 @@ public static class Gemm
         int length = x0.Length;
         int i = 0;
 
-        if (Vector512.IsHardwareAccelerated && length >= Vector512<float>.Count)
+        if (Simd.Use512 && length >= Vector512<float>.Count)
         {
             Vector512<float> a00 = Vector512<float>.Zero, a01 = Vector512<float>.Zero;
             Vector512<float> a02 = Vector512<float>.Zero, a03 = Vector512<float>.Zero;
@@ -337,7 +337,7 @@ public static class Gemm
             results[14] = Vector512.Sum(a32);
             results[15] = Vector512.Sum(a33);
         }
-        else if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        else if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> a00 = Vector256<float>.Zero, a01 = Vector256<float>.Zero;
             Vector256<float> a02 = Vector256<float>.Zero, a03 = Vector256<float>.Zero;
@@ -714,7 +714,7 @@ public static class Gemm
         int i = 0;
         float s0 = 0f, s1 = 0f, s2 = 0f, s3 = 0f;
 
-        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> v0 = Vector256<float>.Zero;
             Vector256<float> v1 = Vector256<float>.Zero;
@@ -759,7 +759,7 @@ public static class Gemm
         int i = 0;
         float sum = 0f;
 
-        if (Vector512.IsHardwareAccelerated && length >= Vector512<float>.Count)
+        if (Simd.Use512 && length >= Vector512<float>.Count)
         {
             Vector512<float> acc = Vector512<float>.Zero;
             for (; i <= length - Vector512<float>.Count; i += Vector512<float>.Count)
@@ -770,7 +770,7 @@ public static class Gemm
 
             sum = Vector512.Sum(acc);
         }
-        else if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        else if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> acc = Vector256<float>.Zero;
             for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)

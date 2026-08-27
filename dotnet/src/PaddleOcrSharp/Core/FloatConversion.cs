@@ -46,7 +46,7 @@ public static class FloatConversion
 
         int i = 0;
 
-        if (Vector256.IsHardwareAccelerated)
+        if (Simd.Use256)
         {
             int width = Vector256<ushort>.Count; // 16 halves -> two 8-wide float vectors
             for (; i <= source.Length - width; i += width)

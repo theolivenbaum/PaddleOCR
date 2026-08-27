@@ -109,6 +109,23 @@ orientation classifier.*
 - [x] Wire into pipeline behind `use_doc_orientation_classify` / `use_doc_unwarping`
 - [x] Parity tests vs. Paddle inference for both graphs and both wrappers
 
+## 9b. Performance
+
+- [x] Machine calibration ahead of every benchmark run (`MachineProfile`): FMA rate at 256 and 512
+      bits, single- and all-thread, cache and DRAM read bandwidth, and the sample spread that says
+      how far to trust the run. Stage figures are reported against it.
+- [x] Per-shape GEMM sweep (`--gemm true`) at the shapes the model issues, as a fraction of the
+      measured ceiling
+- [x] Vectorised the Paddle interpreter's cast and boolean-normalise paths, which the mask head's
+      twelve-million-element tensors run through: layout graph 9.3 s to 7.6 s, `conv2d` flat as a
+      control
+- [x] Vector width is a measured decision, not an assumed one (`Core/Simd.cs`), overridable with
+      `PADDLEOCR_SHARP_VECTOR_BITS`
+- [ ] Store boolean tensors in a byte-wide buffer. `PaddleTensor` backs them with `long[]`, so a
+      `[1, 300, 200, 200]` mask costs 96 MB instead of 12 and its first touch is page-fault bound.
+      The remaining elementwise time in the layout graph is mostly this.
+- [ ] Convolution is now a third of the layout graph and is the next thing worth attacking
+
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`
 
 - [x] Layout box filtering (`filter_overlap_boxes`) and merge modes (`union` / `large`),
