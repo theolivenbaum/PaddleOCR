@@ -205,6 +205,34 @@ Not every plausible idea survives measurement: banding `Gemm.Linear` over activa
 band stays cached across all the column panels, is a clear win on paper and was consistently
 slower in practice. The panel loop's traffic is evidently already absorbed by the shared cache.
 
+## What the pipeline does beyond the models
+
+Roughly half the port is not model code. These are the stages that decide what the models are
+asked and what becomes of their answers, all of them checked against the upstream functions
+named beside them:
+
+| Stage | Upstream |
+| --- | --- |
+| Drop overlapping regions, consulting their outlines | `filter_overlap_boxes` |
+| Stack a paragraph split across columns into one image | `merge_blocks`, `merge_images` |
+| Trim a formula's margins, upscale a small spotting crop | `crop_margin`, `pre_process_for_spotting` |
+| Cover figures inside a table with `[Fn]` placeholders and put them back afterwards | `tokenize_figure_of_table`, `untokenize_figure_of_table` |
+| Cut runaway repetition out of a block's output | `truncate_repetitive_content` |
+| OTSL markup to HTML | `convert_otsl_to_html` |
+| Spotting's `<|LOC_n|>` coordinates to polygons | `post_process_for_spotting` |
+| Number the blocks that belong to the reading flow | `update_order_index` |
+| Render the page, HTML decoration and all | `MarkdownConverter`, `build_handle_funcs_dict` |
+| Rejoin a table split by a page break | `merge_tables_across_pages` |
+| Decide how deep each heading sits | `assign_levels_to_parsing_res` |
+
+Three places diverge from upstream on purpose, and each says so where it is implemented: the
+token glyphs painted over a table's figures (SkiaSharp, not OpenCV's Hershey font), the
+clustering behind heading levels (an exact one-dimensional k-means, not scikit-learn's seeded
+local search), and the shuffle that assigns those token numbers (a stable bijection, not
+Python's Mersenne Twister). One upstream quirk is reproduced rather than repaired — the doubled
+quote in `untokenize_figure_of_table`'s `alt` attribute — because it is what lands in a
+consumer's HTML.
+
 ## Working agreements for this port
 
 1. Read the upstream Python for a stage **before** writing the C# for it. Quote the file and

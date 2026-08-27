@@ -61,12 +61,26 @@ agree without further configuration.
 | `dump_layout.py` | `layout.npz` | `cv2.resize` output and every fetched tensor of the PP-DocLayoutV3 graph |
 | `dump_end_to_end.py` | `end_to_end.npz`, `end_to_end_table.npz` | layout boxes plus per-block recognised text for a whole page, after the pipeline's own repetition truncation and OTSL→HTML conversion |
 | `dump_preprocessing.py` | `preprocessing.npz` | orientation-classifier inputs and logits for an upright and a rotated page, and UVDoc's input and flattened output |
+| `dump_contours.py` | `contours.npz` | `findContours`, `contourArea`, `arcLength` and `approxPolyDP` over 60 masks |
+| `dump_polygons.py` | `polygons.npz` | Shapely areas and overlap ratios, `minAreaRect`, and `fillPoly` rasters |
+| `dump_layout_polygons.py` | `layout_polygons.npz` | `extract_polygon_points_by_masks` for all four shape modes |
+| `dump_markdown.py` | `markdown.npz` | `MarkdownConverter` over every label, in six settings combinations |
+| `dump_table_merge.py` | `table_merge.npz` | `merge_table.py`'s decisions and merged HTML for eleven page pairs |
+| `dump_title_levels.py` | `title_levels.npz` | `title_level.py`'s numbering styles, text heights, clustering and final levels |
 
 Run them from this directory:
 
 ```bash
 for script in dump_*.py; do python3 "$script"; done
 ```
+
+Several of these exec a slice of PaddleX rather than importing it: the checkout under
+`/home/user/ref/PaddleX` is not an installed package, so importing it whole fails on its own
+metadata lookup. Exec'ing the functions under test also pins each reference to the exact source
+being ported, which is the point.
+
+They need `shapely`, `beautifulsoup4`, `scikit-learn` and `colorlog` on top of the model
+dependencies; `pip install` them if a dumper reports one missing.
 
 ## Debugging a mismatch
 
