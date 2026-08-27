@@ -19,6 +19,16 @@ public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, in
     /// </remarks>
     public int? Order { get; init; }
 
+    /// <summary>
+    /// Identifies the blocks that were stacked into one image before recognition, or
+    /// <see langword="null"/> for a block that stands alone.
+    /// </summary>
+    /// <remarks>
+    /// <c>group_id</c>: the index of the group's first block, carried by every member, so a
+    /// consumer can tell that a paragraph split across two columns is one paragraph.
+    /// </remarks>
+    public int? GroupId { get; init; }
+
     /// <summary>Encoded image bytes when the block is a figure kept as an image.</summary>
     public byte[]? Image { get; init; }
 

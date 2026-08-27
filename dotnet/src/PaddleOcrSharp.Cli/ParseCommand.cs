@@ -216,10 +216,11 @@ public static class ParseCommand
             page.Index,
             page.Width,
             page.Height,
-            [.. page.Blocks.Select(block => new JsonBlock(
+            [.. page.Blocks.Select((block, index) => new JsonBlock(
                 block.Label,
                 block.ReadingOrder,
                 block.Order,
+                block.GroupId ?? index,
                 block.Box.Score,
                 [block.Box.Left, block.Box.Top, block.Box.Right, block.Box.Bottom],
                 block.Content,
@@ -265,6 +266,7 @@ internal sealed record JsonBlock(
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("reading_order")] int ReadingOrder,
     [property: JsonPropertyName("block_order")] int? Order,
+    [property: JsonPropertyName("group_id")] int GroupId,
     [property: JsonPropertyName("score")] float Score,
     [property: JsonPropertyName("bbox")] float[] BoundingBox,
     [property: JsonPropertyName("content")] string Content,

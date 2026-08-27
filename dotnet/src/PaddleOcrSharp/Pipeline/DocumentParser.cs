@@ -191,7 +191,11 @@ public sealed class DocumentParser : IDisposable
 
                 try
                 {
-                    blocks[primary] = Recognize(prepared, region, primary, settings, cancellationToken);
+                    blocks[primary] = Recognize(prepared, region, settings, cancellationToken);
+                    if (group.Indices.Count > 1)
+                    {
+                        blocks[primary] = blocks[primary] with { GroupId = primary };
+                    }
                 }
                 finally
                 {
@@ -214,7 +218,10 @@ public sealed class DocumentParser : IDisposable
                 {
                     int index = group.Indices[i];
                     LayoutBox other = regions[index].ClampTo(page.Width, page.Height);
-                    blocks[index] = new ParsedBlock(other.Label, other, string.Empty, other.ReadingOrder);
+                    blocks[index] = new ParsedBlock(other.Label, other, string.Empty, other.ReadingOrder)
+                    {
+                        GroupId = primary,
+                    };
                 }
 
                 progress?.Report(new BlockProgress(
@@ -319,7 +326,6 @@ public sealed class DocumentParser : IDisposable
     private ParsedBlock Recognize(
         RgbImage crop,
         LayoutBox region,
-        int index,
         DocumentParserOptions options,
         CancellationToken cancellationToken)
     {
