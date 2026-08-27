@@ -129,7 +129,9 @@ public static class ParseCommand
 
                     if (outputDirectory is not null)
                     {
-                        await WritePageAsync(page, label, outputDirectory, options, cancellation.Token)
+                        await WritePageAsync(
+                            command.GetBool("format-block-content", false),
+                            page, label, outputDirectory, options, cancellation.Token)
                             .ConfigureAwait(false);
                     }
                 }
@@ -143,7 +145,10 @@ public static class ParseCommand
             string format = command.Get("format", "markdown")!;
             var document = Restructure(new ParsedDocument(pages), command);
             Console.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
-                ? ToJson(pages)
+                ? ToJson(
+                    document.Pages,
+                    options.MarkdownSettings,
+                    command.GetBool("format-block-content", false))
                 : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!));
         }
 
@@ -176,6 +181,7 @@ public static class ParseCommand
     }
 
     private static async Task WritePageAsync(
+        bool formatContent,
         ParsedPage page,
         string stem,
         string outputDirectory,
@@ -190,7 +196,7 @@ public static class ParseCommand
 
         await File.WriteAllTextAsync(
             Path.Combine(outputDirectory, $"{stem}.json"),
-            ToJson([page]),
+            ToJson([page], options.MarkdownSettings, formatContent),
             cancellationToken).ConfigureAwait(false);
 
         foreach (ParsedBlock block in page.Blocks)
@@ -233,7 +239,10 @@ public static class ParseCommand
     private static int? OptionalPixels(CommandLine command, string name) =>
         command.Has(name) ? command.GetInt(name, BlockPrompt.DefaultMaxPixels) : null;
 
-    private static string ToJson(IReadOnlyList<ParsedPage> pages) => JsonSerializer.Serialize(
+    private static string ToJson(
+        IReadOnlyList<ParsedPage> pages,
+        MarkdownOptions markdown,
+        bool formatContent) => JsonSerializer.Serialize(
         pages.Select(page => new JsonPage(
             page.Index,
             page.Width,
@@ -243,9 +252,15 @@ public static class ParseCommand
                 block.ReadingOrder,
                 block.Order,
                 block.GroupId ?? index,
+                block.TitleLevel,
                 block.Box.Score,
                 [block.Box.Left, block.Box.Top, block.Box.Right, block.Box.Bottom],
-                block.Content,
+                block.Box.Polygon is { Length: > 0 } outline
+                    ? [.. outline.SelectMany(point => new[] { point.X, point.Y })]
+                    : null,
+                formatContent
+                    ? MarkdownWriter.FormatBlock(block, markdown, page.Width)
+                    : block.Content,
                 block.ImagePath))]))
             .ToArray(),
         ResultJson.Default.JsonPageArray);
@@ -289,8 +304,10 @@ internal sealed record JsonBlock(
     [property: JsonPropertyName("reading_order")] int ReadingOrder,
     [property: JsonPropertyName("block_order")] int? Order,
     [property: JsonPropertyName("group_id")] int GroupId,
+    [property: JsonPropertyName("title_level")] int? TitleLevel,
     [property: JsonPropertyName("score")] float Score,
     [property: JsonPropertyName("bbox")] float[] BoundingBox,
+    [property: JsonPropertyName("block_polygon_points")] float[]? Polygon,
     [property: JsonPropertyName("content")] string Content,
     [property: JsonPropertyName("image")] string? Image);
 

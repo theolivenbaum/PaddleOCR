@@ -14,6 +14,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The parity tests drive a few post-processing stages directly; they are internal because
+         they are not a contract, not because they are untested. -->
+    <InternalsVisibleTo Include="PaddleOcrSharp.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="SkiaSharp" Version="3.119.0" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.0" />
     <PackageReference Include="System.Numerics.Tensors" Version="10.0.0" />

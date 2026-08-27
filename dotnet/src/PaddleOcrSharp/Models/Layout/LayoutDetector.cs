@@ -102,6 +102,11 @@ public sealed class LayoutDetector : IDisposable
     }
 
     /// <summary>
+    /// A detector with no graph behind it, for exercising the post-processing chain on its own.
+    /// </summary>
+    internal static LayoutDetector ForTesting(string[] labels) => new(null!, labels);
+
+    /// <summary>
     /// Applies the pipeline's post-processing chain to the raw <c>[N, 7]</c> detection tensor.
     /// </summary>
     internal IReadOnlyList<LayoutBox> PostProcess(
@@ -120,19 +125,30 @@ public sealed class LayoutDetector : IDisposable
         {
             int classId = (int)data[row * columns];
             float score = data[(row * columns) + 1];
-            if (classId < 0 || score <= options.Threshold)
+
+            // Upstream defaults a class the per-class table does not mention to 0.5, not to the
+            // shared threshold: naming any class opts the rest out of it.
+            float threshold = options.ClassThresholds is null
+                ? options.Threshold
+                : options.ClassThresholds.GetValueOrDefault(classId, 0.5f);
+
+            if (classId < 0 || score <= threshold)
             {
                 continue;
             }
 
+            // Rounded to whole pixels before anything else looks at them, which is what upstream
+            // does on the line above its own threshold test. Everything downstream — the overlap
+            // ratios, the containment tests, the mask crop, the block crop — then works from the
+            // same integers it does, rather than from coordinates that agree only to a fraction.
             boxes.Add(new LayoutBox(
                 classId,
                 classId < _labels.Length ? _labels[classId] : "unknown",
                 score,
-                data[(row * columns) + 2],
-                data[(row * columns) + 3],
-                data[(row * columns) + 4],
-                data[(row * columns) + 5],
+                Round(data[(row * columns) + 2]),
+                Round(data[(row * columns) + 3]),
+                Round(data[(row * columns) + 4]),
+                Round(data[(row * columns) + 5]),
                 columns > 6 ? (int)data[(row * columns) + 6] : row)
             {
                 QueryIndex = row,
@@ -159,7 +175,17 @@ public sealed class LayoutDetector : IDisposable
             AttachPolygons(boxes, masks, pageWidth, pageHeight, options.ShapeMode);
         }
 
-        if (options.UnclipRatio != (1f, 1f))
+        if (options.ClassUnclipRatios is not null)
+        {
+            for (int i = 0; i < boxes.Count; i++)
+            {
+                if (options.ClassUnclipRatios.TryGetValue(boxes[i].ClassId, out var ratio))
+                {
+                    boxes[i] = Unclip(boxes[i], ratio);
+                }
+            }
+        }
+        else if (options.UnclipRatio != (1f, 1f))
         {
             for (int i = 0; i < boxes.Count; i++)
             {
@@ -327,6 +353,9 @@ public sealed class LayoutDetector : IDisposable
 
     private static bool IsContained(LayoutBox inner, LayoutBox outer) =>
         inner.Area > 0 && inner.IntersectionWith(outer) / inner.Area >= 0.9f;
+
+    /// <summary>Rounds a coordinate to a whole pixel, half to even, as <c>np.round</c> does.</summary>
+    private static float Round(float value) => MathF.Round(value, MidpointRounding.ToEven);
 
     /// <summary>Reduces each box's mask to a polygon and attaches it.</summary>
     private static void AttachPolygons(

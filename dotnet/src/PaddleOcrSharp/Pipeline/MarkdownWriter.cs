@@ -88,6 +88,22 @@ public static partial class MarkdownWriter
         return builder.ToString();
     }
 
+    /// <summary>
+    /// Formats one block the way it would appear in the markdown.
+    /// </summary>
+    /// <remarks>
+    /// <c>format_block_content</c>: the JSON can carry each block's rendered form instead of its
+    /// raw content, so a consumer reading the JSON sees the same thing a reader of the markdown
+    /// would. A block whose label the renderer does not handle keeps its content unchanged.
+    /// </remarks>
+    /// <param name="block">The block to format.</param>
+    /// <param name="options">Formatting options.</param>
+    /// <param name="pageWidth">Page width in pixels, for scaling figures.</param>
+    public static string FormatBlock(ParsedBlock block, MarkdownOptions options, int pageWidth = 0) =>
+        Handled.Contains(block.Label)
+            ? Format(block, block.Content, options, pageWidth)
+            : block.Content;
+
     private static string Format(ParsedBlock block, string content, MarkdownOptions options, int pageWidth) =>
         block.Label switch
         {

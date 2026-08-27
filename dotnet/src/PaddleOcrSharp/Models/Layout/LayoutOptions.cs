@@ -61,8 +61,17 @@ public sealed record LayoutOptions
     /// <summary>Defaults from <c>deploy/paddleocr_vl_docker/pipeline_config_vllm.yaml</c>.</summary>
     public static LayoutOptions Default { get; } = new();
 
-    /// <summary>Score threshold applied to every class.</summary>
+    /// <summary>Score threshold applied to every class without one of its own.</summary>
     public float Threshold { get; init; } = 0.3f;
+
+    /// <summary>
+    /// Per-class score thresholds, keyed by class id.
+    /// </summary>
+    /// <remarks>
+    /// A class listed here uses its own threshold; upstream defaults an unlisted class to
+    /// <c>0.5</c> when any per-class threshold is given at all, rather than to the shared one.
+    /// </remarks>
+    public IReadOnlyDictionary<int, float>? ClassThresholds { get; init; }
 
     /// <summary>
     /// Which shape each region is reduced to. Anything but <see cref="LayoutShapeMode.Rect"/>
@@ -81,6 +90,11 @@ public sealed record LayoutOptions
 
     /// <summary>Horizontal and vertical expansion applied to every surviving box.</summary>
     public (float Horizontal, float Vertical) UnclipRatio { get; init; } = (1.0f, 1.0f);
+
+    /// <summary>
+    /// Per-class box expansion, keyed by class id; a class not listed is left alone.
+    /// </summary>
+    public IReadOnlyDictionary<int, (float Horizontal, float Vertical)>? ClassUnclipRatios { get; init; }
 
     /// <summary>Containment resolution per class id; classes not listed default to union.</summary>
     public IReadOnlyDictionary<int, LayoutMergeMode> MergeModes { get; init; } = DefaultMergeModes;

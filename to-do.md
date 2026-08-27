@@ -93,7 +93,8 @@ orientation classifier.*
 - [x] HGNetV2-L backbone (stem, stages, LearnableAffineBlock)
 - [x] Hybrid encoder (AIFI transformer level + CCFM/PAN fusion)
 - [x] Deformable-DETR decoder (300 queries, 6 layers, 4 sample points)
-- [x] Post-process: sigmoid scores, box decode, threshold 0.3, NMS, unclip, label map
+- [x] Post-process: integer rounding, sigmoid scores, box decode, threshold 0.3 (shared or
+      per class), NMS, unclip (shared or per class), label map
 - [x] Reading-order head
 - [x] Mask head: region polygons (`layout_shape_mode` rect/quad/poly/auto), used for overlap
       filtering and for masking each block's crop
@@ -122,6 +123,8 @@ orientation classifier.*
 - [x] Repetition truncation (`truncate_repetitive_content`)
 - [x] Spotting `<|LOC_n|>` post-processing
 - [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
+- [x] JSON carries `block_order`, `group_id`, `title_level` and `block_polygon_points`;
+      `format_block_content` renders each block instead of emitting its raw text
 - [x] The pipeline's HTML-decorated ("pretty") markdown, byte-for-byte against `MarkdownConverter`
 - [x] Cross-page table merging (`restructure_pages(merge_tables=True)`)
 - [x] Title re-levelling (`assign_levels_to_parsing_res`); its height clustering is an exact
