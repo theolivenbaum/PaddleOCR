@@ -5,11 +5,15 @@ using SkiaSharp;
 
 namespace PaddleOcrSharp.Pipeline;
 
+/// <summary>A picture the page contains, as <c>gather_imgs</c> collects them.</summary>
+/// <param name="Path">File name the figure is written to, which also identifies it.</param>
+/// <param name="Box">The figure's region, in page coordinates.</param>
+public readonly record struct DocumentFigure(string Path, LayoutBox Box);
+
 /// <summary>A figure that sits inside a table and was replaced by a placeholder token.</summary>
 /// <param name="Token">The placeholder written into the table image, e.g. <c>[F23]</c>.</param>
-/// <param name="RegionIndex">Index of the figure's region in the page's detection list.</param>
-/// <param name="Path">File name the figure will be written to.</param>
-public readonly record struct TokenizedFigure(string Token, int RegionIndex, string Path);
+/// <param name="Path">File name of the figure the token stands for.</param>
+public readonly record struct TokenizedFigure(string Token, string Path);
 
 /// <summary>
 /// Replaces figures inside a table with short placeholder tokens before recognition, then puts
@@ -46,24 +50,19 @@ public static partial class TableFigureTokenizer
     /// </summary>
     /// <param name="tableCrop">The table's crop; a modified copy is returned.</param>
     /// <param name="table">The table's region, in page coordinates.</param>
-    /// <param name="regions">Every region on the page.</param>
-    /// <param name="figurePaths">File name assigned to each region, indexed alike.</param>
-    /// <returns>The painted crop and the figures it covered.</returns>
-    public static (RgbImage Image, IReadOnlyList<TokenizedFigure> Figures) Tokenize(
-        RgbImage tableCrop,
-        LayoutBox table,
-        IReadOnlyList<LayoutBox> regions,
-        IReadOnlyList<string?> figurePaths)
+    /// <param name="figures">Every picture on the page.</param>
+    /// <returns>
+    /// The painted crop, the figures that were given a token, and the paths of every figure the
+    /// table swallowed — including the ones too small to tokenise, which are covered over all the
+    /// same and so must not also appear as blocks of their own.
+    /// </returns>
+    public static (RgbImage Image, IReadOnlyList<TokenizedFigure> Tokens, IReadOnlyList<string> Absorbed)
+        Tokenize(RgbImage tableCrop, LayoutBox table, IReadOnlyList<DocumentFigure> figures)
     {
         var contained = new List<int>();
-        for (int i = 0; i < regions.Count; i++)
+        for (int i = 0; i < figures.Count; i++)
         {
-            if (figurePaths[i] is null || !BlockLabels.ImageLabels.Contains(regions[i].Label))
-            {
-                continue;
-            }
-
-            LayoutBox figure = regions[i];
+            LayoutBox figure = figures[i].Box;
             if (figure.Left >= table.Left
                 && figure.Top >= table.Top
                 && figure.Right <= table.Right
@@ -75,16 +74,22 @@ public static partial class TableFigureTokenizer
 
         if (contained.Count == 0)
         {
-            return (tableCrop.Clone(), []);
+            return (tableCrop.Clone(), [], []);
         }
 
         RgbImage painted = tableCrop.Clone();
         var tokens = new List<TokenizedFigure>(contained.Count);
-        int[] numbers = TokenNumbers(contained.Count);
+        var absorbed = new List<string>(contained.Count);
 
-        for (int index = 0; index < contained.Count; index++)
+        // Numbered over the whole figure list, so a figure's token does not depend on which
+        // table happens to contain it.
+        int[] numbers = TokenNumbers(figures.Count);
+
+        foreach (int index in contained)
         {
-            LayoutBox figure = regions[contained[index]];
+            DocumentFigure entry = figures[index];
+            LayoutBox figure = entry.Box;
+            absorbed.Add(entry.Path);
 
             int left = (int)(figure.Left - table.Left);
             int top = (int)(figure.Top - table.Top);
@@ -101,10 +106,10 @@ public static partial class TableFigureTokenizer
 
             string token = $"[F{numbers[index]}]";
             Paint(painted, left, top, right, bottom, token);
-            tokens.Add(new TokenizedFigure(token, contained[index], figurePaths[contained[index]]!));
+            tokens.Add(new TokenizedFigure(token, entry.Path));
         }
 
-        return (painted, tokens);
+        return (painted, tokens, absorbed);
     }
 
     /// <summary>
@@ -113,11 +118,15 @@ public static partial class TableFigureTokenizer
     /// <param name="html">Recognised table HTML.</param>
     /// <param name="figures">Figures produced by <see cref="Tokenize"/>.</param>
     /// <param name="imageDirectory">Directory prefix written into the <c>src</c> attribute.</param>
+    /// <param name="textOf">
+    /// The recognised text of the figure at a path, if any, which follows its image. A figure the
+    /// page no longer has a block for returns null, and its token is left as it was.
+    /// </param>
     public static string Untokenize(
         string html,
         IReadOnlyList<TokenizedFigure> figures,
         string imageDirectory,
-        Func<int, string>? textOf = null)
+        Func<string, string?>? textOf = null)
     {
         if (figures.Count == 0)
         {
@@ -134,6 +143,12 @@ public static partial class TableFigureTokenizer
                 return match.Value;
             }
 
+            string? text = textOf?.Invoke(figure.Path);
+            if (textOf is not null && text is null)
+            {
+                return match.Value;
+            }
+
             string path = $"{imageDirectory}/{figure.Path}"
                 .Replace("-\n", string.Empty, StringComparison.Ordinal)
                 .Replace("\n", " ", StringComparison.Ordinal);
@@ -142,8 +157,7 @@ public static partial class TableFigureTokenizer
             // a consumer reads, so it is reproduced rather than tidied.
             string tag = $"<img src=\"{path}\" alt=\"Image\"\" />";
 
-            string text = textOf?.Invoke(figure.RegionIndex) ?? string.Empty;
-            return text.Length > 0 ? $"{tag}\n\n{text}\n\n" : tag;
+            return text is { Length: > 0 } ? $"{tag}\n\n{text}\n\n" : tag;
         });
     }
 

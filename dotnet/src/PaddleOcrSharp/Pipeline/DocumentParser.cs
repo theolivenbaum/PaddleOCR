@@ -113,9 +113,17 @@ public sealed class DocumentParser : IDisposable
         IProgress<BlockProgress>? progress,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<LayoutBox> regions = settings.UseLayoutDetection && _layout is not null
-            ? OverlapFilter.Apply(_layout.Detect(page, settings.Layout))
+        IReadOnlyList<LayoutBox> detected = settings.UseLayoutDetection && _layout is not null
+            ? _layout.Detect(page, settings.Layout)
             : [WholePage(page, settings.WholePageLabel)];
+
+        // The page's pictures are gathered before the overlap filter runs, which is what lets a
+        // figure a table swallowed still be identified after the filter has dropped it.
+        IReadOnlyList<DocumentFigure> figures = GatherFigures(detected, page.Width, page.Height);
+
+        IReadOnlyList<LayoutBox> regions = settings.UseLayoutDetection && _layout is not null
+            ? OverlapFilter.Apply(detected)
+            : detected;
 
         var crops = new RgbImage[regions.Count];
         var sizes = new (int Width, int Height)[regions.Count];
@@ -144,15 +152,6 @@ public sealed class DocumentParser : IDisposable
                 sizes[i] = (crops[i].Width, crops[i].Height);
             }
 
-            string?[] figurePaths = new string?[regions.Count];
-            for (int i = 0; i < regions.Count; i++)
-            {
-                if (KeptAsPicture(regions[i].Label, settings))
-                {
-                    figurePaths[i] = FigurePath(regions[i]);
-                }
-            }
-
             IReadOnlyCollection<string> nonMergeLabels = NonMergeLabels(settings);
             List<BlockGroup> groups = settings.MergeLayoutBlocks && regions.Count > 1
                 ? BlockMerger.Group(regions, sizes, nonMergeLabels)
@@ -160,7 +159,7 @@ public sealed class DocumentParser : IDisposable
 
             var blocks = new ParsedBlock[regions.Count];
             var tokenizedByBlock = new IReadOnlyList<TokenizedFigure>?[regions.Count];
-            var absorbed = new HashSet<int>();
+            var absorbed = new HashSet<string>(StringComparer.Ordinal);
             int completed = 0;
 
             void RecognizeGroup(int groupIndex)
@@ -181,8 +180,13 @@ public sealed class DocumentParser : IDisposable
 
                 if (region.Label == "table" && settings.TokenizeTableFigures)
                 {
-                    (prepared, tokenized) = TableFigureTokenizer.Tokenize(
-                        merged, region, regions, figurePaths);
+                    (prepared, tokenized, IReadOnlyList<string> swallowed) =
+                        TableFigureTokenizer.Tokenize(merged, region, figures);
+
+                    lock (absorbed)
+                    {
+                        absorbed.UnionWith(swallowed);
+                    }
                 }
 
                 try
@@ -202,14 +206,6 @@ public sealed class DocumentParser : IDisposable
                     // Substituting the placeholders has to wait until every block is recognised,
                     // because a figure's own text goes in beside its image.
                     tokenizedByBlock[primary] = tokenized;
-
-                    lock (absorbed)
-                    {
-                        foreach (TokenizedFigure figure in tokenized)
-                        {
-                            absorbed.Add(figure.RegionIndex);
-                        }
-                    }
                 }
 
                 // Every region of a merged group keeps its box so the JSON still describes the
@@ -255,7 +251,8 @@ public sealed class DocumentParser : IDisposable
                             blocks[i].Content,
                             tokenized,
                             settings.Markdown.ImageDirectory,
-                            region => blocks[region]?.Content ?? string.Empty),
+                            path => blocks.FirstOrDefault(
+                                block => block?.ImagePath == path)?.Content),
                     };
                 }
             }
@@ -264,7 +261,7 @@ public sealed class DocumentParser : IDisposable
             // belong to the page as separate blocks.
             IReadOnlyList<ParsedBlock> retained = absorbed.Count == 0
                 ? blocks
-                : [.. blocks.Where((_, index) => !absorbed.Contains(index))];
+                : [.. blocks.Where(block => block.ImagePath is null || !absorbed.Contains(block.ImagePath))];
 
             return new ParsedPage(pageIndex, page.Width, page.Height, BlockOrder.Assign(retained, settings.Markdown.IgnoredLabels));
         }
@@ -439,6 +436,40 @@ public sealed class DocumentParser : IDisposable
                 row[(x * 3) + 2] = 255;
             }
         }
+    }
+
+    /// <summary>
+    /// The pictures a page contains, as <c>gather_imgs</c> collects them.
+    /// </summary>
+    /// <remarks>
+    /// A narrower set of labels than the blocks that keep a picture: running-head and running-foot
+    /// images are not gathered, and a seal is. This is the list a table's figure tokenisation
+    /// works from, so the difference decides which pictures a table can swallow.
+    /// </remarks>
+    private static List<DocumentFigure> GatherFigures(
+        IReadOnlyList<LayoutBox> detected,
+        int pageWidth,
+        int pageHeight)
+    {
+        var figures = new List<DocumentFigure>();
+
+        foreach (LayoutBox box in detected)
+        {
+            if (box.Label is not ("image" or "figure" or "seal"))
+            {
+                continue;
+            }
+
+            LayoutBox clamped = box.ClampTo(pageWidth, pageHeight);
+            if (clamped.Right <= clamped.Left || clamped.Bottom <= clamped.Top)
+            {
+                continue;
+            }
+
+            figures.Add(new DocumentFigure(FigurePath(box), box));
+        }
+
+        return figures;
     }
 
     /// <summary>

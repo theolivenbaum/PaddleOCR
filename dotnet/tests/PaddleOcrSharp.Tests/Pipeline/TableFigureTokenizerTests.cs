@@ -17,19 +17,18 @@ public class TableFigureTokenizerTests
     public void FiguresInsideTheTableAreTokenized()
     {
         LayoutBox table = Box("table", 0, 0, 400, 300);
-        LayoutBox[] regions = [table, Box("image", 50, 50, 150, 150)];
-        string?[] paths = [null, "image_1_50_50.png"];
+        DocumentFigure[] figuresOnPage = [new("a.jpg", Box("image", 50, 50, 150, 150))];
 
         using RgbImage crop = Grey(400, 300);
-        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures) =
-            TableFigureTokenizer.Tokenize(crop, table, regions, paths);
+        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures, IReadOnlyList<string> absorbed) =
+            TableFigureTokenizer.Tokenize(crop, table, figuresOnPage);
 
         using (painted)
         {
             TokenizedFigure figure = Assert.Single(figures);
-            Assert.Equal(1, figure.RegionIndex);
             Assert.StartsWith("[F", figure.Token);
-            Assert.Equal("image_1_50_50.png", figure.Path);
+            Assert.Equal("a.jpg", figure.Path);
+            Assert.Equal(["a.jpg"], absorbed);
 
             // The figure's area was painted over: its corner is no longer the original grey.
             Assert.NotEqual(128, painted.Row(55)[52 * 3]);
@@ -40,16 +39,16 @@ public class TableFigureTokenizerTests
     public void FiguresOutsideTheTableAreLeftAlone()
     {
         LayoutBox table = Box("table", 0, 0, 200, 200);
-        LayoutBox[] regions = [table, Box("image", 300, 300, 400, 400)];
-        string?[] paths = [null, "image_1_300_300.png"];
+        DocumentFigure[] figuresOnPage = [new("a.jpg", Box("image", 300, 300, 400, 400))];
 
         using RgbImage crop = Grey(200, 200);
-        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures) =
-            TableFigureTokenizer.Tokenize(crop, table, regions, paths);
+        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures, IReadOnlyList<string> absorbed) =
+            TableFigureTokenizer.Tokenize(crop, table, figuresOnPage);
 
         using (painted)
         {
             Assert.Empty(figures);
+            Assert.Empty(absorbed);
             Assert.Equal(128, painted.Row(10)[10 * 3]);
         }
     }
@@ -58,16 +57,19 @@ public class TableFigureTokenizerTests
     public void TinyFiguresAreBlankedButNotTokenized()
     {
         LayoutBox table = Box("table", 0, 0, 200, 200);
-        LayoutBox[] regions = [table, Box("image", 20, 20, 35, 35)];
-        string?[] paths = [null, "image_1_20_20.png"];
+        DocumentFigure[] figuresOnPage = [new("a.jpg", Box("image", 20, 20, 35, 35))];
 
         using RgbImage crop = Grey(200, 200);
-        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures) =
-            TableFigureTokenizer.Tokenize(crop, table, regions, paths);
+        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures, IReadOnlyList<string> absorbed) =
+            TableFigureTokenizer.Tokenize(crop, table, figuresOnPage);
 
         using (painted)
         {
             Assert.Empty(figures);
+
+            // Covered over, and still removed from the page: a picture the table swallowed must
+            // not also stand on its own.
+            Assert.Equal(["a.jpg"], absorbed);
             Assert.Equal(255, painted.Row(25)[25 * 3]);
         }
     }
@@ -76,18 +78,17 @@ public class TableFigureTokenizerTests
     public void TokenNumbersAvoidConfusableDigits()
     {
         LayoutBox table = Box("table", 0, 0, 1000, 1000);
-        var regions = new List<LayoutBox> { table };
-        var paths = new List<string?> { null };
+        var figuresOnPage = new List<DocumentFigure>();
 
         for (int i = 0; i < 12; i++)
         {
-            regions.Add(Box("image", 10 + (i * 60), 10, 60 + (i * 60), 60));
-            paths.Add($"image_{i}.png");
+            figuresOnPage.Add(new DocumentFigure(
+                $"img_{i}.jpg", Box("image", 10 + (i * 60), 10, 60 + (i * 60), 60)));
         }
 
         using RgbImage crop = Grey(1000, 1000);
-        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures) =
-            TableFigureTokenizer.Tokenize(crop, table, regions, paths);
+        (RgbImage painted, IReadOnlyList<TokenizedFigure> figures, _) =
+            TableFigureTokenizer.Tokenize(crop, table, figuresOnPage);
 
         using (painted)
         {
@@ -108,7 +109,7 @@ public class TableFigureTokenizerTests
     public void PlaceholdersBecomeImageReferences()
     {
         IReadOnlyList<TokenizedFigure> figures =
-            [new TokenizedFigure("[F23]", 4, "img_in_image_box_10_20_60_80.jpg")];
+            [new TokenizedFigure("[F23]", "img_in_image_box_10_20_60_80.jpg")];
 
         string html = TableFigureTokenizer.Untokenize(
             "<table><tr><td>[F23]</td><td>x</td></tr></table>", figures, "imgs");
@@ -124,7 +125,7 @@ public class TableFigureTokenizerTests
     public void AFiguresOwnTextFollowsItsImage()
     {
         IReadOnlyList<TokenizedFigure> figures =
-            [new TokenizedFigure("[F23]", 4, "img_in_image_box_10_20_60_80.jpg")];
+            [new TokenizedFigure("[F23]", "img_in_image_box_10_20_60_80.jpg")];
 
         string html = TableFigureTokenizer.Untokenize(
             "<td>[F23]</td>", figures, "imgs", _ => "A caption");
@@ -135,7 +136,7 @@ public class TableFigureTokenizerTests
     [Fact]
     public void UnknownPlaceholdersAreLeftInPlace()
     {
-        IReadOnlyList<TokenizedFigure> figures = [new TokenizedFigure("[F23]", 4, "a.png")];
+        IReadOnlyList<TokenizedFigure> figures = [new TokenizedFigure("[F23]", "a.jpg")];
 
         string html = TableFigureTokenizer.Untokenize("<td>[F44]</td>", figures, "imgs");
 
