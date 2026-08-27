@@ -52,6 +52,22 @@ public sealed record DocumentParserOptions
     public MarkdownOptions Markdown { get; init; } = MarkdownOptions.Default;
 
     /// <summary>
+    /// <see cref="Markdown"/> with the settings the renderer shares with the pipeline filled in.
+    /// </summary>
+    /// <remarks>
+    /// Whether charts became tables, whether a seal or figure has recognised text to show, and
+    /// whether layout detection ran are decisions made here, and upstream's renderer reads them
+    /// straight out of the pipeline's own settings rather than being told again.
+    /// </remarks>
+    public MarkdownOptions MarkdownSettings => Markdown with
+    {
+        ShowImageText = UseOcrForImageBlocks,
+        ShowSealText = UseSealRecognition,
+        ChartsAsTables = UseChartRecognition,
+        UseLayoutDetection = UseLayoutDetection,
+    };
+
+    /// <summary>
     /// The instruction used when layout detection is off, i.e. the whole page is one block.
     /// </summary>
     public string WholePagePrompt { get; init; } = BlockPrompt.Ocr;

@@ -75,6 +75,7 @@ expectations:
 | Contours and polygons | the OpenCV and Shapely calls behind the mask head, against cv2 and Shapely themselves |
 | Region polygons | `extract_polygon_points_by_masks` for all four `layout_shape_mode` values |
 | Orientation classifier, UVDoc | both graphs against Paddle's own run, and both wrappers end to end |
+| Markdown | the rendered page against PaddleX's own `MarkdownConverter`, over every label and six settings combinations |
 | Whole pipeline | block labels, boxes and recognised text for a rendered page |
 
 Run them with `dotnet test`. Tests that need the checkpoints or the generated fixtures skip

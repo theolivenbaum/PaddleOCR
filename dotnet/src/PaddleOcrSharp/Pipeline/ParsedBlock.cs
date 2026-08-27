@@ -41,7 +41,7 @@ public sealed record ParsedPage(int Index, int Width, int Height, IReadOnlyList<
     /// <summary>Renders the page as markdown.</summary>
     /// <param name="options">Formatting options; defaults to the shipped pipeline's.</param>
     public string ToMarkdown(MarkdownOptions? options = null) =>
-        MarkdownWriter.Write(Blocks, options ?? MarkdownOptions.Default);
+        MarkdownWriter.Write(Blocks, options ?? MarkdownOptions.Default, Width);
 }
 
 /// <summary>A parsed document: one or more pages.</summary>

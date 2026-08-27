@@ -53,24 +53,41 @@ public class MarkdownWriterTests
     }
 
     [Fact]
-    public void TableContentIsEmittedVerbatim()
+    public void TablesAreStyledForTheRenderedMarkdown()
     {
         const string Html = "<table><tr><td>a</td></tr></table>";
         string markdown = MarkdownWriter.Write([Block("table", Html)], MarkdownOptions.Default);
-        Assert.Equal(Html, markdown);
+
+        Assert.Equal(
+            "\n<table border=1 style='margin: auto; word-wrap: break-word;'><tr>"
+            + "<td style='text-align: center; word-wrap: break-word;'>a</td></tr></table>",
+            markdown);
     }
 
     [Fact]
-    public void FormulasAreWrappedInDisplayMath()
+    public void PlainRenderingLeavesTableHtmlAlone()
     {
+        const string Html = "<html><body><table><tr><td>a</td></tr></table></body></html>";
+        string markdown = MarkdownWriter.Write(
+            [Block("table", Html)], MarkdownOptions.Default with { Pretty = false });
+
+        Assert.Equal("\n\n<table><tr><td>a</td></tr></table>", markdown);
+    }
+
+    [Fact]
+    public void FormulaContentIsPassedThrough()
+    {
+        // The renderer adds no delimiters of its own: `formula_func` upstream is the identity,
+        // and the `$$` a display formula carries was put there by the pipeline's delimiter
+        // normalisation before the block ever reached markdown.
         string markdown = MarkdownWriter.Write(
             [Block("display_formula", "E = mc^2")], MarkdownOptions.Default);
 
-        Assert.Equal("$$E = mc^2$$", markdown);
+        Assert.Equal("E = mc^2", markdown);
     }
 
     [Fact]
-    public void AlreadyWrappedFormulasAreNotDoubleWrapped()
+    public void DelimitedFormulasKeepTheirDelimiters()
     {
         string markdown = MarkdownWriter.Write(
             [Block("display_formula", "$$E = mc^2$$")], MarkdownOptions.Default);

@@ -144,7 +144,7 @@ public static class ParseCommand
             var document = new ParsedDocument(pages);
             Console.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
                 ? ToJson(pages)
-                : document.ToMarkdown(options.Markdown, command.Get("page-separator", "\n\n")!));
+                : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!));
         }
 
         return 0;
@@ -185,7 +185,7 @@ public static class ParseCommand
 
         await File.WriteAllTextAsync(
             Path.Combine(outputDirectory, $"{stem}.md"),
-            page.ToMarkdown(options.Markdown),
+            page.ToMarkdown(options.MarkdownSettings),
             cancellationToken).ConfigureAwait(false);
 
         await File.WriteAllTextAsync(
