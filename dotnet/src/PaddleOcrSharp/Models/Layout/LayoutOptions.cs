@@ -1,5 +1,27 @@
 namespace PaddleOcrSharp.Models.Layout;
 
+/// <summary>
+/// Which shape a detected region is reduced to.
+/// </summary>
+/// <remarks>
+/// The detector emits a mask per region as well as a box. <c>layout_shape_mode</c> upstream;
+/// the default is <see cref="Auto"/>.
+/// </remarks>
+public enum LayoutShapeMode
+{
+    /// <summary>The region's polygon, whatever shape the mask gives it.</summary>
+    Poly,
+
+    /// <summary>The minimum-area rectangle enclosing the polygon, which may be rotated.</summary>
+    Quad,
+
+    /// <summary>The axis-aligned bounding box; the masks are not used at all.</summary>
+    Rect,
+
+    /// <summary>Rectangle, quad or polygon, whichever fits the region without over-claiming.</summary>
+    Auto,
+}
+
 /// <summary>How overlapping boxes of related classes are resolved.</summary>
 public enum LayoutMergeMode
 {

@@ -126,9 +126,19 @@ public static class Contours
     /// Douglas-Peucker simplification, matching <c>cv2.approxPolyDP</c>.
     /// </summary>
     /// <remarks>
-    /// A closed curve has no natural endpoints, so OpenCV first splits it at the point farthest
-    /// from an arbitrary start and then at the point farthest from that — the same two-anchor
-    /// trick, repeated three times to settle — and simplifies the two arcs independently.
+    /// <para>
+    /// Two details separate this from the textbook algorithm, and both change which vertices
+    /// survive. The distance being maximised is to the <em>segment</em>, not to the infinite line
+    /// through it: a point that projects past either end is measured to that endpoint instead.
+    /// And a closed curve has no endpoints to anchor on, so it is split at the point farthest
+    /// from an arbitrary start and then at the point farthest from that, settled over three
+    /// passes, and the two arcs are simplified independently.
+    /// </para>
+    /// <para>
+    /// A final pass then drops any vertex that sits almost on the line between its neighbours,
+    /// provided the corner does not double back. Skipping it leaves vertices the recursion had
+    /// to keep as arc boundaries but that the finished outline does not need.
+    /// </para>
     /// </remarks>
     /// <param name="contour">The contour to simplify.</param>
     /// <param name="epsilon">Maximum distance from the simplified curve to the original.</param>
@@ -141,107 +151,215 @@ public static class Contours
             return [];
         }
 
-        double epsilonSquared = epsilon * epsilon;
-        var result = new List<PixelPoint>(count);
+        double eps = epsilon * epsilon;
+        var simplified = new List<PixelPoint>(count);
         var stack = new Stack<(int Start, int End)>();
+
+        bool isClosed = closed;
+        int iterations = 3;
+        int position = 0;
+        int splitStart = 0;
+        bool withinEpsilon = false;
+        PixelPoint startPoint = default;
+        PixelPoint endPoint;
+        PixelPoint point;
 
         if (!closed)
         {
-            if (count == 1)
+            if (contour[count - 1] != contour[0])
             {
-                return [contour[0]];
+                stack.Push((0, count - 1));
             }
-
-            stack.Push((0, count - 1));
+            else
+            {
+                isClosed = true;
+                iterations = 1;
+            }
         }
-        else
-        {
-            // Three passes of "walk to the farthest point from here"; OpenCV's init_iters.
-            int position = 0;
-            int farthest = 0;
-            bool withinEpsilon = false;
 
-            for (int iteration = 0; iteration < 3; iteration++)
+        if (isClosed)
+        {
+            for (int iteration = 0; iteration < iterations; iteration++)
             {
                 double maximum = 0;
-                position = (position + farthest) % count;
-                PixelPoint anchor = contour[position];
+                position = (position + splitStart) % count;
+                startPoint = Read(contour, ref position, count);
 
                 for (int j = 1; j < count; j++)
                 {
-                    PixelPoint point = contour[(position + j) % count];
-                    double dx = point.X - anchor.X;
-                    double dy = point.Y - anchor.Y;
+                    point = Read(contour, ref position, count);
+                    double dx = point.X - startPoint.X;
+                    double dy = point.Y - startPoint.Y;
                     double distance = (dx * dx) + (dy * dy);
 
                     if (distance > maximum)
                     {
                         maximum = distance;
-                        farthest = j;
+                        splitStart = j;
                     }
                 }
 
-                withinEpsilon = maximum <= epsilonSquared;
+                withinEpsilon = maximum <= eps;
             }
 
             if (withinEpsilon)
             {
-                return [contour[position]];
+                simplified.Add(startPoint);
             }
+            else
+            {
+                int sliceStart = position % count;
+                int rightEnd = sliceStart;
+                splitStart = (splitStart + sliceStart) % count;
 
-            // Two arcs between the anchors, each walked in increasing index with wraparound.
-            stack.Push((position + farthest, position + count));
-            stack.Push((position, position + farthest));
+                stack.Push((splitStart, rightEnd));
+                stack.Push((sliceStart, splitStart));
+            }
         }
 
         while (stack.Count > 0)
         {
             (int start, int end) = stack.Pop();
-            PixelPoint startPoint = contour[start % count];
-            PixelPoint endPoint = contour[end % count];
+            endPoint = contour[end];
+            position = start;
+            startPoint = Read(contour, ref position, count);
 
-            bool simplify = true;
-            int split = start;
-
-            if (end - start > 1)
+            if (position != end)
             {
                 double dx = endPoint.X - startPoint.X;
                 double dy = endPoint.Y - startPoint.Y;
+                double segment = (dx * dx) + (dy * dy);
                 double maximum = 0;
 
-                for (int i = start + 1; i < end; i++)
+                while (position != end)
                 {
-                    PixelPoint point = contour[i % count];
-                    double distance = Math.Abs(
-                        ((point.X - startPoint.X) * dy) - ((point.Y - startPoint.Y) * dx));
+                    point = Read(contour, ref position, count);
+                    double offsetX = point.X - startPoint.X;
+                    double offsetY = point.Y - startPoint.Y;
+                    double projection = (offsetX * dx) + (offsetY * dy);
+                    double scaled;
 
-                    if (distance > maximum)
+                    if (projection < 0)
                     {
-                        maximum = distance;
-                        split = i;
+                        scaled = ((offsetX * offsetX) + (offsetY * offsetY)) * segment;
+                    }
+                    else if (projection > segment)
+                    {
+                        double toEndX = point.X - endPoint.X;
+                        double toEndY = point.Y - endPoint.Y;
+                        scaled = ((toEndX * toEndX) + (toEndY * toEndY)) * segment;
+                    }
+                    else
+                    {
+                        double cross = (offsetY * dx) - (offsetX * dy);
+                        scaled = cross * cross;
+                    }
+
+                    if (scaled > maximum)
+                    {
+                        maximum = scaled;
+                        splitStart = (position + count - 1) % count;
                     }
                 }
 
-                simplify = maximum * maximum <= epsilonSquared * ((dx * dx) + (dy * dy));
-            }
-
-            if (simplify)
-            {
-                result.Add(startPoint);
+                withinEpsilon = maximum <= eps * segment;
             }
             else
             {
-                stack.Push((split, end));
-                stack.Push((start, split));
+                withinEpsilon = true;
+                startPoint = contour[start];
+            }
+
+            if (withinEpsilon)
+            {
+                simplified.Add(startPoint);
+            }
+            else
+            {
+                stack.Push((splitStart, end));
+                stack.Push((start, splitStart));
             }
         }
 
         if (!closed)
         {
-            result.Add(contour[count - 1]);
+            simplified.Add(contour[count - 1]);
         }
 
-        return [.. result];
+        return Straighten([.. simplified], eps, closed);
+    }
+
+    /// <summary>Drops vertices that lie almost on the line between their neighbours.</summary>
+    private static PixelPoint[] Straighten(PixelPoint[] points, double eps, bool closed)
+    {
+        int count = points.Length;
+        if (count == 0)
+        {
+            return points;
+        }
+
+        int remaining = count;
+        int readPosition = closed ? count - 1 : 0;
+        PixelPoint start = Read(points, ref readPosition, count);
+        int writePosition = readPosition;
+        PixelPoint middle = Read(points, ref readPosition, count);
+
+        int edge = closed ? 0 : 1;
+
+        for (int i = edge; i < count - edge && remaining > 2; i++)
+        {
+            PixelPoint end = Read(points, ref readPosition, count);
+
+            double dx = end.X - start.X;
+            double dy = end.Y - start.Y;
+            double distance = Math.Abs(((middle.X - start.X) * dy) - ((middle.Y - start.Y) * dx));
+            double inner = ((double)(middle.X - start.X) * (end.X - middle.X))
+                + ((double)(middle.Y - start.Y) * (end.Y - middle.Y));
+
+            if (distance * distance <= 0.5 * eps * ((dx * dx) + (dy * dy))
+                && dx != 0
+                && dy != 0
+                && inner >= 0)
+            {
+                remaining--;
+                points[writePosition] = start = end;
+                if (++writePosition >= count)
+                {
+                    writePosition = 0;
+                }
+
+                middle = Read(points, ref readPosition, count);
+                i++;
+                continue;
+            }
+
+            points[writePosition] = start = middle;
+            if (++writePosition >= count)
+            {
+                writePosition = 0;
+            }
+
+            middle = end;
+        }
+
+        if (!closed)
+        {
+            points[writePosition] = middle;
+        }
+
+        return points[..remaining];
+    }
+
+    /// <summary>Reads the point at <paramref name="position"/> and advances it, wrapping.</summary>
+    private static PixelPoint Read(ReadOnlySpan<PixelPoint> points, ref int position, int count)
+    {
+        PixelPoint point = points[position];
+        if (++position >= count)
+        {
+            position = 0;
+        }
+
+        return point;
     }
 
     /// <summary>Labels the 8-connected component containing <paramref name="seed"/>.</summary>

@@ -36,18 +36,30 @@ def handwritten() -> list[np.ndarray]:
 
 
 def blobs() -> list[np.ndarray]:
-    """Random masks in the shape `mask2polygon` actually sees: a resized per-box crop."""
+    """Random masks in the shape `mask2polygon` actually sees: a resized per-box crop.
+
+    Enough of them, and wiggly enough, to exercise `approxPolyDP`'s recursion properly — the
+    clamped segment distance and the final straightening pass only diverge from a textbook
+    Douglas-Peucker on boundaries with real detail.
+    """
     out = []
-    for seed, (h, w) in enumerate([(24, 40), (60, 45), (17, 90), (80, 80), (33, 21)]):
+    sizes = [(24, 40), (60, 45), (17, 90), (80, 80), (33, 21)]
+    rng_sizes = np.random.default_rng(31)
+    sizes += [
+        (int(rng_sizes.integers(20, 220)), int(rng_sizes.integers(20, 220)))
+        for _ in range(45)
+    ]
+
+    for seed, (h, w) in enumerate(sizes):
         rng = np.random.default_rng(seed + 100)
         mask = np.zeros((h, w), dtype=np.uint8)
 
         # A few overlapping filled ellipses, then a threshold, which is close to what a
         # detector's mask head produces once it is resized to the box.
         yy, xx = np.mgrid[0:h, 0:w]
-        for _ in range(3):
+        for _ in range(int(rng.integers(1, 5))):
             cy, cx = rng.integers(0, h), rng.integers(0, w)
-            ry, rx = rng.integers(h // 6 + 1, h // 2 + 2), rng.integers(w // 6 + 1, w // 2 + 2)
+            ry, rx = rng.integers(3, h // 2 + 2), rng.integers(3, w // 2 + 2)
             mask |= (((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1).astype(np.uint8)
 
         out.append(mask)
