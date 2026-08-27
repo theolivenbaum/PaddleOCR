@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PaddleOcrSharp/PaddleOcrSharp.csproj" />
+    <Project Path="src/PaddleOcrSharp.Cli/PaddleOcrSharp.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PaddleOcrSharp.Tests/PaddleOcrSharp.Tests.csproj" />
+  </Folder>
+</Solution>
