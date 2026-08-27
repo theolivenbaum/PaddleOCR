@@ -123,6 +123,47 @@ public class PolygonParityTests
         Assert.True(failures.Count == 0, string.Join("\n", failures.Take(10)));
     }
 
+    [Fact]
+    public void FilledPolygonsMatchOpenCv()
+    {
+        Fixture.RequireOrSkip(FixtureName);
+        var fixtures = Fixture.Load(FixtureName);
+        long[] size = fixtures["fill_size"].ToInt64();
+        int width = (int)size[0];
+        int height = (int)size[1];
+
+        var failures = new List<string>();
+
+        for (int index = 0; index < Count(fixtures); index++)
+        {
+            long[] flat = fixtures[$"fillpts_{index}"].ToInt64();
+            var points = new (int X, int Y)[flat.Length / 2];
+            for (int i = 0; i < points.Length; i++)
+            {
+                points[i] = ((int)flat[i * 2], (int)flat[(i * 2) + 1]);
+            }
+
+            bool[] actual = Polygons.Fill(points, width, height);
+            byte[] expected = fixtures[$"fill_{index}"].ToBytes();
+
+            int differing = 0;
+            for (int i = 0; i < expected.Length; i++)
+            {
+                if (actual[i] != (expected[i] != 0))
+                {
+                    differing++;
+                }
+            }
+
+            if (differing > 0)
+            {
+                failures.Add($"polygon {index}: {differing} of {expected.Length} pixels differ");
+            }
+        }
+
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
     private static int Count(Dictionary<string, PaddleOcrSharp.Formats.NpyArray> fixtures) =>
         (int)fixtures["count"].ToInt64()[0];
 

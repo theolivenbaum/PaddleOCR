@@ -125,11 +125,22 @@ public sealed class DocumentParser : IDisposable
             for (int i = 0; i < regions.Count; i++)
             {
                 LayoutBox region = regions[i].ClampTo(page.Width, page.Height);
-                crops[i] = page.Crop(
-                    (int)MathF.Floor(region.Left),
-                    (int)MathF.Floor(region.Top),
-                    (int)MathF.Ceiling(region.Right),
-                    (int)MathF.Ceiling(region.Bottom));
+
+                // Truncated, not rounded outward: `restructured_boxes` clamps each edge into the
+                // page and then takes `int(...)` of all four, so the right and bottom edges fall
+                // back to the pixel they are inside rather than the next one out.
+                int left = (int)region.Left;
+                int top = (int)region.Top;
+                crops[i] = page.Crop(left, top, (int)region.Right, (int)region.Bottom);
+
+                // A region with an outline keeps only what the outline covers; the rest of the
+                // crop goes white so the model does not read a neighbour's text out of the
+                // corners of a slanted or L-shaped block.
+                if (region.Polygon is { Length: > 2 } outline)
+                {
+                    MaskToPolygon(crops[i], outline, left, top);
+                }
+
                 sizes[i] = (crops[i].Width, crops[i].Height);
             }
 
@@ -353,6 +364,35 @@ public sealed class DocumentParser : IDisposable
         }
 
         return crop.Clone();
+    }
+
+    /// <summary>Whitens every pixel of <paramref name="crop"/> outside <paramref name="outline"/>.</summary>
+    private static void MaskToPolygon(RgbImage crop, (float X, float Y)[] outline, int left, int top)
+    {
+        var shifted = new (int X, int Y)[outline.Length];
+        for (int i = 0; i < outline.Length; i++)
+        {
+            shifted[i] = ((int)outline[i].X - left, (int)outline[i].Y - top);
+        }
+
+        bool[] inside = Polygons.Fill(shifted, crop.Width, crop.Height);
+
+        for (int y = 0; y < crop.Height; y++)
+        {
+            Span<byte> row = crop.Row(y);
+            int rowBase = y * crop.Width;
+            for (int x = 0; x < crop.Width; x++)
+            {
+                if (inside[rowBase + x])
+                {
+                    continue;
+                }
+
+                row[x * 3] = 255;
+                row[(x * 3) + 1] = 255;
+                row[(x * 3) + 2] = 255;
+            }
+        }
     }
 
     /// <summary>File name a figure block is written to.</summary>

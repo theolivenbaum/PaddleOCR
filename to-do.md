@@ -94,7 +94,9 @@ orientation classifier.*
 - [x] Hybrid encoder (AIFI transformer level + CCFM/PAN fusion)
 - [x] Deformable-DETR decoder (300 queries, 6 layers, 4 sample points)
 - [x] Post-process: sigmoid scores, box decode, threshold 0.3, NMS, unclip, label map
-- [x] Reading-order / mask heads as far as the pipeline needs them
+- [x] Reading-order head
+- [x] Mask head: region polygons (`layout_shape_mode` rect/quad/poly/auto), used for overlap
+      filtering and for masking each block's crop
 - [x] Parity tests vs. Paddle reference detections on sample pages
 
 ## 9. Doc pre-processing (optional models)

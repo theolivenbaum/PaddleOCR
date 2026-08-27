@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Layout;
 
 namespace PaddleOcrSharp.Pipeline;
@@ -77,6 +78,17 @@ public static class OverlapFilter
                 }
 
                 if (overlap <= ContainmentThreshold)
+                {
+                    continue;
+                }
+
+                // Boxes can overlap heavily while the regions themselves barely touch — two
+                // columns of a slanted scan, a caption beside a figure. When both regions have an
+                // outline, that is what decides, not the rectangles around them.
+                if (candidates[i].Polygon is { Length: > 2 } first
+                    && candidates[j].Polygon is { Length: > 2 } second
+                    && Polygons.OverlapRatio(first, second, Polygons.OverlapMode.Small)
+                        < ContainmentThreshold)
                 {
                     continue;
                 }

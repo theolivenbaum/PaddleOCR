@@ -21,6 +21,19 @@ public readonly record struct LayoutBox(
     float Bottom,
     int ReadingOrder)
 {
+    /// <summary>
+    /// The region's outline, when the detector's mask head produced one.
+    /// </summary>
+    /// <remarks>
+    /// Present whenever <see cref="LayoutOptions.ShapeMode"/> is not
+    /// <see cref="LayoutShapeMode.Rect"/>. Its corners can sit outside the box: a rotated region's
+    /// quad is the minimum-area rectangle around the mask, not a subset of the axis-aligned one.
+    /// </remarks>
+    public (float X, float Y)[]? Polygon { get; init; }
+
+    /// <summary>Index of the detector query this box came from, which is also its mask's index.</summary>
+    internal int QueryIndex { get; init; }
+
     /// <summary>Width of the region.</summary>
     public float Width => Right - Left;
 

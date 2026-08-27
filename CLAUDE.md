@@ -71,6 +71,14 @@ An RT-DETR–style detector: HGNetV2-L backbone → hybrid encoder (`d_model 256
 strides 8/16/32) → 6-layer deformable decoder, 300 queries, 25 classes, plus mask and
 reading-order heads. Input `800×800`, `1/255` rescale, no mean/std, `NCHW`.
 
+The graph has three fetches: boxes `[N, 7]`, a box count, and a `[N, 200, 200]` mask per query.
+The masks are not decoration — upstream's default `layout_shape_mode = "auto"` reduces each to a
+polygon and uses it both to decide whether two overlapping boxes are really the same region and
+to white out everything outside the region in the block's crop. A slanted scan or an L-shaped
+column is where that matters. Reproducing it needs `findContours`, `approxPolyDP`, `minAreaRect`,
+`fillPoly` and Shapely's polygon intersection, all of which are ported in `Imaging/Contours.cs`
+and `Imaging/Polygons.cs` and checked against the originals.
+
 **This model is not hand-ported.** It ships only as a Paddle inference graph — there is no
 upstream PyTorch module tree to port from — so `Models/Paddle` interprets the exported graph
 directly. Every operator in that interpreter is our own kernel; what we take from Paddle is the

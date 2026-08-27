@@ -72,6 +72,8 @@ expectations:
 | Tokenizer | encode and decode over 27 mixed-script cases, including byte fallback and the `<\|LOC_n\|>` tokens |
 | Decoder | prompt ids, 3-D rope index, prefill logits and 24 greedy steps, token for token |
 | Layout graph | every fetched tensor against Paddle's own inference run |
+| Contours and polygons | the OpenCV and Shapely calls behind the mask head, against cv2 and Shapely themselves |
+| Region polygons | `extract_polygon_points_by_masks` for all four `layout_shape_mode` values |
 | Orientation classifier, UVDoc | both graphs against Paddle's own run, and both wrappers end to end |
 | Whole pipeline | block labels, boxes and recognised text for a rendered page |
 

@@ -86,6 +86,17 @@ def main() -> None:
             ratios[i, j, 1] = inter / min(a.area, b.area) if min(a.area, b.area) else 0.0
             ratios[i, j, 2] = inter / max(a.area, b.area) if max(a.area, b.area) else 0.0
 
+    # `crop_by_boxes` masks a region's crop with cv2.fillPoly, so the raster needs a reference
+    # too. Integer outlines, because that is what the crop path passes.
+    fill_w, fill_h = 40, 32
+    for index, polygon in enumerate(polygons):
+        pts = np.round(polygon).astype(np.int32)
+        canvas = np.zeros((fill_h, fill_w), dtype=np.uint8)
+        cv2.fillPoly(canvas, [pts.reshape(-1, 1, 2)], 1)
+        payload[f"fill_{index}"] = canvas
+        payload[f"fillpts_{index}"] = pts
+
+    payload["fill_size"] = np.asarray([fill_w, fill_h], dtype=np.int32)
     payload["ratios"] = ratios
     payload["intersections"] = intersections
     payload["count"] = np.asarray([count], dtype=np.int32)

@@ -64,6 +64,12 @@ public sealed record LayoutOptions
     /// <summary>Score threshold applied to every class.</summary>
     public float Threshold { get; init; } = 0.3f;
 
+    /// <summary>
+    /// Which shape each region is reduced to. Anything but <see cref="LayoutShapeMode.Rect"/>
+    /// runs the detector's mask head through <see cref="LayoutPolygons"/>.
+    /// </summary>
+    public LayoutShapeMode ShapeMode { get; init; } = LayoutShapeMode.Auto;
+
     /// <summary>Whether layout-aware non-maximum suppression runs.</summary>
     public bool Nms { get; init; } = true;
 

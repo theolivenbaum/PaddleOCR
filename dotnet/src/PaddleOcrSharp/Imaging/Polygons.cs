@@ -191,6 +191,231 @@ public static class Polygons
         return Order([.. best.Select(p => ((float)p.X, (float)p.Y))]);
     }
 
+    /// <summary>
+    /// Rasterises a filled polygon, matching <c>cv2.fillPoly</c>.
+    /// </summary>
+    /// <remarks>
+    /// Two passes, because that is what OpenCV does: every edge is drawn as a Bresenham line and
+    /// the interior is then scanline-filled. The edge pass is not decoration — a scanline fill
+    /// alone leaves off the bottom row, the right column, and most of any near-horizontal edge,
+    /// since those lie between the sampled rows.
+    /// </remarks>
+    /// <param name="polygon">The outline, in pixel coordinates.</param>
+    /// <param name="width">Raster width.</param>
+    /// <param name="height">Raster height.</param>
+    /// <returns>One flag per pixel, row-major.</returns>
+    public static bool[] Fill(ReadOnlySpan<(int X, int Y)> polygon, int width, int height)
+    {
+        bool[] inside = new bool[width * height];
+        if (polygon.Length < 2 || width <= 0 || height <= 0)
+        {
+            return inside;
+        }
+
+        int top = int.MaxValue;
+        int bottom = int.MinValue;
+        foreach ((int X, int Y) point in polygon)
+        {
+            top = Math.Min(top, point.Y);
+            bottom = Math.Max(bottom, point.Y);
+        }
+
+        top = Math.Max(top, 0);
+        bottom = Math.Min(bottom, height - 1);
+
+        for (int i = 0; i < polygon.Length; i++)
+        {
+            DrawLine(inside, width, height, polygon[i], polygon[(i + 1) % polygon.Length]);
+        }
+
+        var crossings = new List<double>(polygon.Length);
+
+        for (int y = top; y <= bottom; y++)
+        {
+            crossings.Clear();
+            double scan = y;
+
+            for (int i = 0; i < polygon.Length; i++)
+            {
+                (int X, int Y) a = polygon[i];
+                (int X, int Y) b = polygon[(i + 1) % polygon.Length];
+
+                if (a.Y == b.Y)
+                {
+                    continue;
+                }
+
+                (int X, int Y) lower = a.Y < b.Y ? a : b;
+                (int X, int Y) upper = a.Y < b.Y ? b : a;
+
+                // Half-open in y, so a vertex shared by two edges is counted once.
+                if (scan < lower.Y || scan >= upper.Y)
+                {
+                    continue;
+                }
+
+                double t = (scan - lower.Y) / (double)(upper.Y - lower.Y);
+                crossings.Add(lower.X + (t * (upper.X - lower.X)));
+            }
+
+            if (crossings.Count < 2)
+            {
+                continue;
+            }
+
+            crossings.Sort();
+            int rowBase = y * width;
+
+            for (int i = 0; i + 1 < crossings.Count; i += 2)
+            {
+                int from = Math.Max((int)Math.Ceiling(crossings[i]), 0);
+                int to = Math.Min((int)Math.Floor(crossings[i + 1]), width - 1);
+
+                for (int x = from; x <= to; x++)
+                {
+                    inside[rowBase + x] = true;
+                }
+            }
+        }
+
+        return inside;
+    }
+
+    /// <summary>Marks the pixels of an 8-connected line, as OpenCV's <c>Line</c> does.</summary>
+    /// <remarks>
+    /// Bresenham with OpenCV's own error initialisation, <c>dx - 2·dy</c>, and its convention of
+    /// always walking left to right. Both matter: a different starting error moves the step by a
+    /// pixel, and walking the other way makes a tie land on the other side.
+    /// </remarks>
+    private static void DrawLine(bool[] raster, int width, int height, (int X, int Y) from, (int X, int Y) to)
+    {
+        // Clipped first, then walked. Clipping during the walk instead would start the error term
+        // from the original endpoint and step differently once inside.
+        if (!Clip(width, height, ref from, ref to))
+        {
+            return;
+        }
+
+        int dx = to.X - from.X;
+        int dy = to.Y - from.Y;
+        (int X, int Y) start = from;
+
+        if (dx < 0)
+        {
+            dx = -dx;
+            dy = -dy;
+            start = to;
+        }
+
+        int stepX = 1;
+        int stepY = 1;
+
+        if (dy < 0)
+        {
+            dy = -dy;
+            stepY = -1;
+        }
+
+        // The longer axis advances on every step; the shorter one only when the error says so.
+        bool vertical = dy > dx;
+        if (vertical)
+        {
+            (dx, dy) = (dy, dx);
+        }
+
+        int majorX = vertical ? 0 : stepX;
+        int majorY = vertical ? stepY : 0;
+        int minorX = vertical ? stepX : 0;
+        int minorY = vertical ? 0 : stepY;
+
+        int error = dx - (dy + dy);
+        int x = start.X;
+        int y = start.Y;
+
+        for (int i = 0; i <= dx; i++)
+        {
+            if (x >= 0 && y >= 0 && x < width && y < height)
+            {
+                raster[(y * width) + x] = true;
+            }
+
+            bool minor = error < 0;
+            error += -(dy + dy) + (minor ? dx + dx : 0);
+
+            x += majorX + (minor ? minorX : 0);
+            y += majorY + (minor ? minorY : 0);
+        }
+    }
+
+    /// <summary>Clips a segment to the raster, as <c>cv2.clipLine</c>.</summary>
+    /// <returns><see langword="false"/> when the segment misses the raster entirely.</returns>
+    private static bool Clip(int width, int height, ref (int X, int Y) first, ref (int X, int Y) second)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        long right = width - 1;
+        long bottom = height - 1;
+
+        long x1 = first.X;
+        long y1 = first.Y;
+        long x2 = second.X;
+        long y2 = second.Y;
+
+        int code1 = Outcode(x1, y1, right, bottom);
+        int code2 = Outcode(x2, y2, right, bottom);
+
+        if ((code1 & code2) == 0 && (code1 | code2) != 0)
+        {
+            // Vertical bounds first, then horizontal, so a corner-crossing segment lands right.
+            if ((code1 & 12) != 0)
+            {
+                long edge = code1 < 8 ? 0 : bottom;
+                x1 += (edge - y1) * (x2 - x1) / (y2 - y1);
+                y1 = edge;
+                code1 = (x1 < 0 ? 1 : 0) + (x1 > right ? 2 : 0);
+            }
+
+            if ((code2 & 12) != 0)
+            {
+                long edge = code2 < 8 ? 0 : bottom;
+                x2 += (edge - y2) * (x1 - x2) / (y1 - y2);
+                y2 = edge;
+                code2 = (x2 < 0 ? 1 : 0) + (x2 > right ? 2 : 0);
+            }
+
+            if ((code1 & code2) == 0 && (code1 | code2) != 0)
+            {
+                if (code1 != 0)
+                {
+                    long edge = code1 == 1 ? 0 : right;
+                    y1 += (edge - x1) * (y2 - y1) / (x2 - x1);
+                    x1 = edge;
+                    code1 = 0;
+                }
+
+                if (code2 != 0)
+                {
+                    long edge = code2 == 1 ? 0 : right;
+                    y2 += (edge - x2) * (y1 - y2) / (x1 - x2);
+                    x2 = edge;
+                    code2 = 0;
+                }
+            }
+
+            first = ((int)x1, (int)y1);
+            second = ((int)x2, (int)y2);
+        }
+
+        return (code1 | code2) == 0;
+    }
+
+    /// <summary>Which of the raster's four edges a point lies outside.</summary>
+    private static int Outcode(long x, long y, long right, long bottom) =>
+        (x < 0 ? 1 : 0) + (x > right ? 2 : 0) + (y < 0 ? 4 : 0) + (y > bottom ? 8 : 0);
+
     /// <summary>Sorts corners by angle about the centre, starting at the one nearest the origin.</summary>
     private static (float X, float Y)[] Order((float X, float Y)[] quad)
     {

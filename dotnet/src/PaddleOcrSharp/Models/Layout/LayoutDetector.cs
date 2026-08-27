@@ -92,7 +92,13 @@ public sealed class LayoutDetector : IDisposable
         Dictionary<string, PaddleTensor> outputs = _interpreter.Run(inputs, trace: null, profile);
         PaddleTensor detections = outputs["fetch_name_0"];
 
-        return PostProcess(detections, page.Width, page.Height, settings);
+        // The graph's third fetch is one mask per query. It is only read when a shape mode asks
+        // for it, but it is always produced, so this costs nothing when it is not.
+        PaddleTensor? masks = settings.ShapeMode == LayoutShapeMode.Rect
+            ? null
+            : outputs.GetValueOrDefault("fetch_name_2");
+
+        return PostProcess(detections, masks, page.Width, page.Height, settings);
     }
 
     /// <summary>
@@ -100,6 +106,7 @@ public sealed class LayoutDetector : IDisposable
     /// </summary>
     internal IReadOnlyList<LayoutBox> PostProcess(
         PaddleTensor detections,
+        PaddleTensor? masks,
         int pageWidth,
         int pageHeight,
         LayoutOptions options)
@@ -126,7 +133,10 @@ public sealed class LayoutDetector : IDisposable
                 data[(row * columns) + 3],
                 data[(row * columns) + 4],
                 data[(row * columns) + 5],
-                columns > 6 ? (int)data[(row * columns) + 6] : row));
+                columns > 6 ? (int)data[(row * columns) + 6] : row)
+            {
+                QueryIndex = row,
+            });
         }
 
         if (options.Nms)
@@ -141,6 +151,13 @@ public sealed class LayoutDetector : IDisposable
 
         boxes = ResolveContainment(boxes, options.MergeModes);
         boxes.Sort(static (left, right) => left.ReadingOrder.CompareTo(right.ReadingOrder));
+
+        // Polygons are extracted from the surviving, ordered boxes and before any unclipping,
+        // which is where upstream does it: unclipping grows the box past what the mask covers.
+        if (masks is not null && options.ShapeMode != LayoutShapeMode.Rect && boxes.Count > 0)
+        {
+            AttachPolygons(boxes, masks, pageWidth, pageHeight, options.ShapeMode);
+        }
 
         if (options.UnclipRatio != (1f, 1f))
         {
@@ -310,6 +327,55 @@ public sealed class LayoutDetector : IDisposable
 
     private static bool IsContained(LayoutBox inner, LayoutBox outer) =>
         inner.Area > 0 && inner.IntersectionWith(outer) / inner.Area >= 0.9f;
+
+    /// <summary>Reduces each box's mask to a polygon and attaches it.</summary>
+    private static void AttachPolygons(
+        List<LayoutBox> boxes,
+        PaddleTensor masks,
+        int pageWidth,
+        int pageHeight,
+        LayoutShapeMode mode)
+    {
+        int maskHeight = masks.Shape[^2];
+        int maskWidth = masks.Shape[^1];
+        int plane = maskWidth * maskHeight;
+        int available = masks.Count / Math.Max(1, plane);
+
+        // The masks are indexed by query, and the boxes have been filtered and reordered since,
+        // so each one is gathered by the index its box remembers.
+        byte[] gathered = new byte[boxes.Count * plane];
+        ReadOnlySpan<float> values = masks.IsFloat ? masks.FloatSpan : default;
+
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            int query = boxes[i].QueryIndex;
+            if (query < 0 || query >= available)
+            {
+                continue;
+            }
+
+            for (int p = 0; p < plane; p++)
+            {
+                int index = (query * plane) + p;
+                bool set = masks.IsFloat ? values[index] != 0f : masks.GetLong(index) != 0;
+                gathered[(i * plane) + p] = set ? (byte)1 : (byte)0;
+            }
+        }
+
+        (float X, float Y)[][] polygons = LayoutPolygons.Extract(
+            boxes,
+            gathered,
+            maskWidth,
+            maskHeight,
+            (double)InputSize / pageWidth,
+            (double)InputSize / pageHeight,
+            mode);
+
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            boxes[i] = boxes[i] with { Polygon = polygons[i] };
+        }
+    }
 
     private static LayoutBox Unclip(LayoutBox box, (float Horizontal, float Vertical) ratio)
     {
