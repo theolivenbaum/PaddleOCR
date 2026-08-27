@@ -7,7 +7,9 @@ namespace PaddleOcrSharp.Pipeline;
 /// </summary>
 /// <remarks>
 /// Port of the dispatch in <c>_paddleocr_vl_collect_page_vlm_entries_core</c>. Every budget
-/// defaults to the pipeline's <c>112896 … 1003520</c>; only spotting raises the ceiling.
+/// defaults to the pipeline's <c>112896 … 1003520</c>; only spotting raises the ceiling. The
+/// budgets themselves live in <see cref="BlockPixelBudgets"/>, which is configurable the way
+/// upstream's <c>vlm_kwargs</c> are.
 /// </remarks>
 public static class BlockPrompt
 {
@@ -56,13 +58,16 @@ public static class BlockPrompt
         };
 
     /// <summary>Preprocessing options for <paramref name="label"/>.</summary>
+    /// <param name="label">Layout label.</param>
+    /// <param name="budgets">Per-label pixel budgets; the pipeline's defaults when omitted.</param>
+    /// <param name="baseline">Options to start from, for callers that changed something else.</param>
     public static VisionPreprocessorOptions Options(
         string label,
+        BlockPixelBudgets? budgets = null,
         VisionPreprocessorOptions? baseline = null)
     {
         VisionPreprocessorOptions options = baseline ?? VisionPreprocessorOptions.Default;
-        return label == "spotting"
-            ? options.WithPixelBudget(DefaultMinPixels, SpottingMaxPixels)
-            : options;
+        (int minPixels, int maxPixels) = (budgets ?? BlockPixelBudgets.Default).For(label);
+        return options.WithPixelBudget(minPixels, maxPixels);
     }
 }

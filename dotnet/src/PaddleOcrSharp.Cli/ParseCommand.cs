@@ -85,6 +85,16 @@ public static class ParseCommand
                 Nms = command.GetBool("layout-nms", LayoutOptions.Default.Nms),
             },
             BlockConcurrency = command.GetInt("block-concurrency", 1),
+            PixelBudgets = new BlockPixelBudgets
+            {
+                MinPixels = command.GetInt("min-pixels", BlockPrompt.DefaultMinPixels),
+                MaxPixels = command.GetInt("max-pixels", BlockPrompt.DefaultMaxPixels),
+                OcrMaxPixels = OptionalPixels(command, "ocr-max-pixels"),
+                TableMaxPixels = OptionalPixels(command, "table-max-pixels"),
+                ChartMaxPixels = OptionalPixels(command, "chart-max-pixels"),
+                FormulaMaxPixels = OptionalPixels(command, "formula-max-pixels"),
+                SealMaxPixels = OptionalPixels(command, "seal-max-pixels"),
+            },
         };
 
         var clock = Stopwatch.StartNew();
@@ -196,6 +206,10 @@ public static class ParseCommand
                 Path.Combine(imageDirectory, block.ImagePath), block.Image, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>Reads a per-label pixel ceiling, leaving it unset when the flag is absent.</summary>
+    private static int? OptionalPixels(CommandLine command, string name) =>
+        command.Has(name) ? command.GetInt(name, BlockPrompt.DefaultMaxPixels) : null;
 
     private static string ToJson(IReadOnlyList<ParsedPage> pages) => JsonSerializer.Serialize(
         pages.Select(page => new JsonPage(

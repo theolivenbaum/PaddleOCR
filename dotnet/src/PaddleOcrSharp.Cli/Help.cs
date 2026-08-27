@@ -48,6 +48,8 @@ public static class Help
               --repetition-penalty <f>
               --min-pixels <n>        Lower pixel budget (default: 112896)
               --max-pixels <n>        Upper pixel budget (default: 1003520)
+              --<kind>-max-pixels <n> Per-label ceiling, overriding --max-pixels; <kind> is one
+                                      of ocr, table, chart, formula, seal
               --output <path>         Write the result to a file instead of stdout
 
             bench options:

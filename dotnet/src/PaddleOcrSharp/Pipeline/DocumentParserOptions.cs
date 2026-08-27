@@ -45,6 +45,9 @@ public sealed record DocumentParserOptions
     /// <summary>Decoding settings for every block.</summary>
     public GenerationOptions Generation { get; init; } = GenerationOptions.Default;
 
+    /// <summary>Per-label pixel budgets for the VL model's input resize.</summary>
+    public BlockPixelBudgets PixelBudgets { get; init; } = BlockPixelBudgets.Default;
+
     /// <summary>Markdown rendering settings.</summary>
     public MarkdownOptions Markdown { get; init; } = MarkdownOptions.Default;
 

@@ -111,7 +111,11 @@ orientation classifier.*
 - [x] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
       `Chart Recognition:`, `Seal Recognition:`, `Spotting:` with per-label pixel budgets
 - [x] Table figure tokenisation / untokenisation (`tokenize_figure_of_table`)
-- [~] Batched VL recognition scheduling (blocks run sequentially or across `BlockConcurrency` threads; upstream batches by pixel budget)
+- [x] Per-label pixel budgets, configurable the way upstream's `vlm_kwargs` are (`BlockPixelBudgets`)
+- [ ] Batch VL recognition across blocks. Upstream groups by pixel budget and hands each group to
+      the model at once; on our CPU path a group is still one image at a time — vision attention is
+      block-diagonal per image, so a batch is arithmetically a sequence. Grouping only becomes
+      worthwhile alongside a batched vision pass.
 - [x] OTSL → HTML table conversion
 - [x] Repetition truncation (`truncate_repetitive_content`)
 - [x] Spotting `<|LOC_n|>` post-processing

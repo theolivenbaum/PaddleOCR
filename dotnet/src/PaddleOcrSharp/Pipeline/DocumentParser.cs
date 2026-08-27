@@ -301,7 +301,7 @@ public sealed class DocumentParser : IDisposable
             ? options.Generation with { SkipSpecialTokens = false }
             : options.Generation;
 
-        VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label);
+        VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label, options.PixelBudgets);
         string raw = _model.Recognize(
             prepared, instruction, preprocessing, generation, cancellationToken);
 
