@@ -1,0 +1,869 @@
+using PaddleOcrSharp.Formats.Paddle;
+using PaddleOcrSharp.Models.Paddle.Ops;
+
+namespace PaddleOcrSharp.Models.Paddle;
+
+/// <summary>
+/// Executes a Paddle PIR inference program.
+/// </summary>
+/// <remarks>
+/// <para>
+/// PP-DocLayoutV3, the document orientation classifier and UVDoc all ship as Paddle inference
+/// graphs rather than as a documented module tree, and there is no upstream PyTorch definition to
+/// port from. Interpreting the exported graph directly is therefore both less code and strictly
+/// more faithful than reconstructing the architecture by hand: every operator here is our own
+/// kernel, and the result is exact by construction rather than by inspection.
+/// </para>
+/// <para>
+/// Operations arrive in SSA execution order, so a single forward pass over the list suffices.
+/// Intermediate values are released as soon as their last consumer has run, which keeps a
+/// 91-convolution backbone at a bounded working set.
+/// </para>
+/// </remarks>
+public sealed class PirInterpreter : IDisposable
+{
+    private readonly PirProgram _program;
+    private readonly PaddleParameterFile _parameters;
+    private readonly Dictionary<int, PaddleTensor> _constants = [];
+    private readonly int[] _lastUse;
+    private readonly int _valueCount;
+
+    private PirInterpreter(PirProgram program, PaddleParameterFile parameters)
+    {
+        _program = program;
+        _parameters = parameters;
+
+        int maximum = 0;
+        foreach (PirOperation operation in program.Operations)
+        {
+            foreach (int id in operation.Outputs)
+            {
+                maximum = Math.Max(maximum, id);
+            }
+
+            foreach (int id in operation.Inputs)
+            {
+                maximum = Math.Max(maximum, id);
+            }
+        }
+
+        _valueCount = maximum + 1;
+        _lastUse = new int[_valueCount];
+        Array.Fill(_lastUse, -1);
+
+        for (int index = 0; index < program.Operations.Count; index++)
+        {
+            foreach (int id in program.Operations[index].Inputs)
+            {
+                if (id > 0)
+                {
+                    _lastUse[id] = index;
+                }
+            }
+        }
+    }
+
+    /// <summary>Names of the program's feed inputs.</summary>
+    public IReadOnlyList<string> InputNames => _program.Inputs;
+
+    /// <summary>Loads a program and its weights from a model directory.</summary>
+    /// <param name="directory">Directory holding <c>inference.json</c> and <c>inference.pdiparams</c>.</param>
+    public static PirInterpreter Load(string directory)
+    {
+        PirProgram program = PirProgram.Load(Path.Combine(directory, "inference.json"));
+        PaddleParameterFile parameters = PaddleParameterFile.Read(
+            Path.Combine(directory, "inference.pdiparams"), program.Parameters);
+        return new PirInterpreter(program, parameters);
+    }
+
+    /// <summary>
+    /// Runs the program.
+    /// </summary>
+    /// <param name="inputs">Feed tensors, keyed by the names in <see cref="InputNames"/>.</param>
+    /// <param name="trace">Optional recorder for intermediate values.</param>
+    /// <returns>The fetched outputs, keyed by fetch name.</returns>
+    public Dictionary<string, PaddleTensor> Run(
+        IReadOnlyDictionary<string, PaddleTensor> inputs,
+        IPirTrace? trace = null)
+    {
+        object?[] values = new object?[_valueCount];
+        var outputs = new Dictionary<string, PaddleTensor>(StringComparer.Ordinal);
+
+        for (int index = 0; index < _program.Operations.Count; index++)
+        {
+            PirOperation operation = _program.Operations[index];
+
+            try
+            {
+                Execute(operation, values, inputs, outputs);
+            }
+            catch (Exception exception) when (exception is not NotSupportedException)
+            {
+                throw new InvalidOperationException(
+                    $"Operation {index} ({operation}) at '{operation.StructName}' failed: {exception.Message}",
+                    exception);
+            }
+
+            trace?.Record(index, operation, operation.Outputs.Select(id => id > 0 ? values[id] : null).ToArray());
+
+            foreach (int id in operation.Inputs)
+            {
+                if (id > 0 && _lastUse[id] == index && !_constants.ContainsKey(id))
+                {
+                    values[id] = null;
+                }
+            }
+        }
+
+        return outputs;
+    }
+
+    private void Execute(
+        PirOperation operation,
+        object?[] values,
+        IReadOnlyDictionary<string, PaddleTensor> inputs,
+        Dictionary<string, PaddleTensor> outputs)
+    {
+        switch (operation.Name)
+        {
+            case "parameter":
+            {
+                int id = operation.Outputs[0];
+                if (!_constants.TryGetValue(id, out PaddleTensor? parameter))
+                {
+                    parameter = PaddleTensor.FromParameter(_parameters[operation.ParameterName!]);
+                    _constants[id] = parameter;
+                }
+
+                values[id] = parameter;
+                return;
+            }
+
+            case "data":
+            {
+                string name = operation.Attribute("name")!.AsString();
+                if (!inputs.TryGetValue(name, out PaddleTensor? tensor))
+                {
+                    throw new ArgumentException($"Program input '{name}' was not supplied.", nameof(inputs));
+                }
+
+                values[operation.Outputs[0]] = tensor;
+                return;
+            }
+
+            case "fetch":
+            {
+                string name = operation.Attribute("name")!.AsString();
+                outputs[name] = Tensor(values, operation.Inputs[0]);
+                values[operation.Outputs[0]] = outputs[name];
+                return;
+            }
+
+            case "combine":
+            {
+                values[operation.Outputs[0]] = operation.Inputs
+                    .Select(id => Tensor(values, id))
+                    .ToArray();
+                return;
+            }
+
+            case "split":
+            {
+                PaddleTensor[] list = List(values, operation.Inputs[0]);
+                for (int i = 0; i < operation.Outputs.Length; i++)
+                {
+                    values[operation.Outputs[i]] = list[i];
+                }
+
+                return;
+            }
+        }
+
+        object[] results = Dispatch(operation, values);
+        for (int i = 0; i < operation.Outputs.Length && i < results.Length; i++)
+        {
+            if (operation.Outputs[i] > 0)
+            {
+                values[operation.Outputs[i]] = results[i];
+            }
+        }
+    }
+
+    private object[] Dispatch(PirOperation operation, object?[] values)
+    {
+        switch (operation.Name)
+        {
+            case "full":
+            {
+                long[] shape = operation.Attribute("shape")!.AsLongArray();
+                double value = operation.Attribute("value")!.AsDouble();
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                return [Fill([.. shape.Select(x => (int)x)], value, dtype)];
+            }
+
+            case "full_int_array":
+            {
+                long[] value = operation.Attribute("value")!.AsLongArray();
+                return [PaddleTensor.FromInts(value, [value.Length])];
+            }
+
+            case "full_like":
+            {
+                PaddleTensor reference = Tensor(values, operation.Inputs[0]);
+                PaddleTensor fill = Tensor(values, operation.Inputs[1]);
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                return [Fill([.. reference.Shape], fill.GetDouble(0), dtype)];
+            }
+
+            case "full_with_tensor":
+            {
+                PaddleTensor first = Tensor(values, operation.Inputs[0]);
+                PaddleTensor second = Tensor(values, operation.Inputs[1]);
+
+                // Paddle's operand order for this op has moved between releases; the shape operand
+                // is the rank-1 integer vector, which identifies it unambiguously.
+                (PaddleTensor shapeTensor, PaddleTensor valueTensor) =
+                    !second.IsFloat && second.Rank == 1 && second.Count <= 8 && first.Count == 1
+                        ? (second, first)
+                        : (first, second);
+
+                int[] shape = [.. Enumerable.Range(0, shapeTensor.Count).Select(i => (int)shapeTensor.GetLong(i))];
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                return [Fill(shape, valueTensor.GetDouble(0), dtype)];
+            }
+
+            case "assign_value_":
+            {
+                long[] shape = operation.Attribute("shape")!.AsLongArray();
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                double[] data = operation.Attribute("values")!.AsDoubleArray();
+                int[] dimensions = [.. shape.Select(x => (int)x)];
+                PaddleTensor result = PaddleTensor.Allocate(dimensions, dtype);
+                for (int i = 0; i < result.Count && i < data.Length; i++)
+                {
+                    if (result.IsFloat)
+                    {
+                        result.Floats![i] = (float)data[i];
+                    }
+                    else
+                    {
+                        result.Ints![i] = (long)data[i];
+                    }
+                }
+
+                return [result];
+            }
+
+            case "arange":
+            {
+                double start = Tensor(values, operation.Inputs[0]).GetDouble(0);
+                double end = Tensor(values, operation.Inputs[1]).GetDouble(0);
+                double step = Tensor(values, operation.Inputs[2]).GetDouble(0);
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+
+                int count = step == 0 ? 0 : Math.Max(0, (int)Math.Ceiling((end - start) / step));
+                PaddleTensor result = PaddleTensor.Allocate([count], dtype);
+                for (int i = 0; i < count; i++)
+                {
+                    double value = start + (i * step);
+                    if (result.IsFloat)
+                    {
+                        result.Floats![i] = (float)value;
+                    }
+                    else
+                    {
+                        result.Ints![i] = (long)value;
+                    }
+                }
+
+                return [result];
+            }
+
+            case "eye":
+            {
+                int rows = (int)Tensor(values, operation.Inputs[0]).GetLong(0);
+                int columns = (int)Tensor(values, operation.Inputs[1]).GetLong(0);
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                return [ShapeOps.Eye(rows, columns, dtype)];
+            }
+
+            case "shape64":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                return [PaddleTensor.FromInts([.. input.Shape.Select(x => (long)x)], [input.Rank])];
+            }
+
+            case "cast":
+            {
+                PaddleDType dtype = PaddleDTypeExtensions.FromName(operation.Attribute("dtype")!.AsString());
+                return [Tensor(values, operation.Inputs[0]).Cast(dtype)];
+            }
+
+            case "share_data_":
+                return [Tensor(values, operation.Inputs[0])];
+
+            case "dropout":
+                // is_test is always true in an exported inference program.
+                return [Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[0])];
+
+            case "conv2d":
+            case "depthwise_conv2d":
+            {
+                return
+                [
+                    ConvOps.Conv2d(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        operation.Attribute("strides")!.AsIntArray(),
+                        operation.Attribute("paddings")!.AsIntArray(),
+                        operation.Attribute("dilations")!.AsIntArray(),
+                        operation.Attribute("groups")!.AsInt(),
+                        operation.Attribute("padding_algorithm")?.AsString() ?? "EXPLICIT",
+                        operation.Attribute("data_format")?.AsString() ?? "NCHW"),
+                ];
+            }
+
+            case "batch_norm_":
+            {
+                PaddleTensor result = LinearOps.BatchNorm(
+                    Tensor(values, operation.Inputs[0]),
+                    Tensor(values, operation.Inputs[1]),
+                    Tensor(values, operation.Inputs[2]),
+                    Tensor(values, operation.Inputs[3]),
+                    Tensor(values, operation.Inputs[4]),
+                    (float)operation.Attribute("epsilon")!.AsDouble(),
+                    operation.Attribute("data_format")?.AsString() ?? "NCHW");
+
+                // Only the first result is consumed downstream; the running statistics and the
+                // saved mean/variance are training-time artefacts.
+                return [result];
+            }
+
+            case "pool2d":
+            {
+                PaddleTensor kernel = Tensor(values, operation.Inputs[1]);
+                return
+                [
+                    ConvOps.Pool2d(
+                        Tensor(values, operation.Inputs[0]),
+                        [.. Enumerable.Range(0, kernel.Count).Select(i => (int)kernel.GetLong(i))],
+                        operation.Attribute("strides")!.AsIntArray(),
+                        operation.Attribute("paddings")!.AsIntArray(),
+                        operation.Attribute("ceil_mode")?.AsBool() ?? false,
+                        operation.Attribute("exclusive")?.AsBool() ?? true,
+                        operation.Attribute("global_pooling")?.AsBool() ?? false,
+                        operation.Attribute("adaptive")?.AsBool() ?? false,
+                        operation.Attribute("pooling_type")!.AsString(),
+                        operation.Attribute("padding_algorithm")?.AsString() ?? "EXPLICIT",
+                        operation.Attribute("data_format")?.AsString() ?? "NCHW"),
+                ];
+            }
+
+            case "matmul":
+                return
+                [
+                    LinearOps.MatMul(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        operation.Attribute("transpose_x")?.AsBool() ?? false,
+                        operation.Attribute("transpose_y")?.AsBool() ?? false),
+                ];
+
+            case "bmm":
+                return [LinearOps.Bmm(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]))];
+
+            case "einsum":
+                return [EinsumOps.Apply(operation.Attribute("equation")!.AsString(), List(values, operation.Inputs[0]))];
+
+            case "layer_norm":
+                return
+                [
+                    LinearOps.LayerNorm(
+                        Tensor(values, operation.Inputs[0]),
+                        Optional(values, operation.Inputs.ElementAtOrDefault(1)),
+                        Optional(values, operation.Inputs.ElementAtOrDefault(2)),
+                        (float)operation.Attribute("epsilon")!.AsDouble(),
+                        operation.Attribute("begin_norm_axis")!.AsInt()),
+                ];
+
+            case "softmax":
+                return [LinearOps.Softmax(Tensor(values, operation.Inputs[0]), operation.Attribute("axis")!.AsInt())];
+
+            case "relu":
+                return [Map(Tensor(values, operation.Inputs[0]), x => x > 0 ? x : 0)];
+
+            case "sigmoid":
+                return [Map(Tensor(values, operation.Inputs[0]), x => 1.0 / (1.0 + Math.Exp(-x)))];
+
+            case "silu":
+                return [Map(Tensor(values, operation.Inputs[0]), x => x / (1.0 + Math.Exp(-x)))];
+
+            case "gelu":
+            {
+                bool approximate = operation.Attribute("approximate")?.AsBool() ?? false;
+                return
+                [
+                    Map(Tensor(values, operation.Inputs[0]), x => approximate
+                        ? 0.5 * x * (1.0 + Math.Tanh(0.7978845608028654 * (x + (0.044715 * x * x * x))))
+                        : 0.5 * x * (1.0 + Erf(x / Math.Sqrt(2.0)))),
+                ];
+            }
+
+            case "log":
+                return [Map(Tensor(values, operation.Inputs[0]), Math.Log)];
+
+            case "floor":
+                return [Map(Tensor(values, operation.Inputs[0]), Math.Floor)];
+
+            case "add":
+                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a + b)];
+
+            case "subtract":
+                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a - b)];
+
+            case "multiply":
+                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a * b)];
+
+            case "divide":
+                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a / b)];
+
+            case "remainder":
+                return
+                [
+                    Broadcast.Apply(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        // Paddle follows Python: the result takes the divisor's sign.
+                        static (a, b) => a - (Math.Floor(a / b) * b)),
+                ];
+
+            case "floor_divide":
+                return
+                [
+                    Broadcast.Apply(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        static (a, b) => Math.Floor(a / b)),
+                ];
+
+            case "greater_than":
+                return [Broadcast.Compare(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a > b)];
+
+            case "scale":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                double factor = operation.Inputs.Length > 1 && operation.Inputs[1] > 0
+                    ? Tensor(values, operation.Inputs[1]).GetDouble(0)
+                    : 1.0;
+                double bias = operation.Attribute("bias")?.AsDouble() ?? 0.0;
+                bool biasAfterScale = operation.Attribute("bias_after_scale")?.AsBool() ?? true;
+
+                return
+                [
+                    Map(input, x => biasAfterScale ? (x * factor) + bias : (x + bias) * factor),
+                ];
+            }
+
+            case "clip":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                double low = Tensor(values, operation.Inputs[1]).GetDouble(0);
+                double high = Tensor(values, operation.Inputs[2]).GetDouble(0);
+                return [Map(input, x => Math.Clamp(x, low, high))];
+            }
+
+            case "where":
+                return
+                [
+                    ReduceOps.Where(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        Tensor(values, operation.Inputs[2])),
+                ];
+
+            case "reshape":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                PaddleTensor shapeTensor = Tensor(values, operation.Inputs[1]);
+                int[] shape = ResolveShape(shapeTensor, input);
+                return [input.Reshaped(shape), PaddleTensor.Vector([.. input.Shape.Select(x => (long)x)])];
+            }
+
+            case "flatten":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                PaddleTensor result = ShapeOps.Flatten(
+                    input,
+                    operation.Attribute("start_axis")!.AsInt(),
+                    operation.Attribute("stop_axis")!.AsInt());
+                return [result, PaddleTensor.Vector([.. input.Shape.Select(x => (long)x)])];
+            }
+
+            case "transpose":
+                return [ShapeOps.Transpose(Tensor(values, operation.Inputs[0]), operation.Attribute("perm")!.AsIntArray())];
+
+            case "unsqueeze":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                long[] axes = AxisArgument(operation, values, 1);
+                return [ShapeOps.Unsqueeze(input, axes), PaddleTensor.Vector([.. input.Shape.Select(x => (long)x)])];
+            }
+
+            case "squeeze":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                long[] axes = AxisArgument(operation, values, 1);
+                return [ShapeOps.Squeeze(input, axes), PaddleTensor.Vector([.. input.Shape.Select(x => (long)x)])];
+            }
+
+            case "slice":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                PaddleTensor starts = Tensor(values, operation.Inputs[1]);
+                PaddleTensor ends = Tensor(values, operation.Inputs[2]);
+                return
+                [
+                    ShapeOps.Slice(
+                        input,
+                        operation.Attribute("axes")!.AsLongArray(),
+                        [.. Enumerable.Range(0, starts.Count).Select(starts.GetLong)],
+                        [.. Enumerable.Range(0, ends.Count).Select(ends.GetLong)],
+                        operation.Attribute("decrease_axis")?.AsLongArray() ?? []),
+                ];
+            }
+
+            case "concat":
+            {
+                PaddleTensor[] list = List(values, operation.Inputs[0]);
+                int axis = (int)Tensor(values, operation.Inputs[1]).GetLong(0);
+                return [ShapeOps.Concat(list, axis)];
+            }
+
+            case "stack":
+            {
+                PaddleTensor[] list = List(values, operation.Inputs[0]);
+                return [ShapeOps.Stack(list, operation.Attribute("axis")?.AsInt() ?? 0)];
+            }
+
+            case "split":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                PaddleTensor sections = Tensor(values, operation.Inputs[1]);
+                int axis = (int)Tensor(values, operation.Inputs[2]).GetLong(0);
+                int[] parts = [.. Enumerable.Range(0, sections.Count).Select(i => (int)sections.GetLong(i))];
+                return [ShapeOps.Split(input, parts, axis)];
+            }
+
+            case "split_with_num":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                int axis = (int)Tensor(values, operation.Inputs[1]).GetLong(0);
+                int number = operation.Attribute("num")!.AsInt();
+                int rank = input.Rank;
+                int resolved = axis < 0 ? axis + rank : axis;
+                int size = input.Shape[resolved] / number;
+                return [ShapeOps.Split(input, [.. Enumerable.Repeat(size, number)], resolved)];
+            }
+
+            case "tile":
+                return [ShapeOps.Tile(Tensor(values, operation.Inputs[0]), ToLongArray(Tensor(values, operation.Inputs[1])))];
+
+            case "expand":
+                return [ShapeOps.Expand(Tensor(values, operation.Inputs[0]), ToLongArray(Tensor(values, operation.Inputs[1])))];
+
+            case "flip":
+                return [ShapeOps.Flip(Tensor(values, operation.Inputs[0]), operation.Attribute("axis")!.AsLongArray())];
+
+            case "gather_nd":
+                return [ShapeOps.GatherNd(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]))];
+
+            case "meshgrid":
+                return [ShapeOps.MeshGrid(List(values, operation.Inputs[0]))];
+
+            case "sum":
+                return
+                [
+                    ReduceOps.Reduce(
+                        Tensor(values, operation.Inputs[0]),
+                        ToLongArray(Tensor(values, operation.Inputs[1])),
+                        operation.Attribute("keepdim")?.AsBool() ?? false,
+                        ReduceOps.Kind.Sum),
+                ];
+
+            case "max":
+                return
+                [
+                    ReduceOps.Reduce(
+                        Tensor(values, operation.Inputs[0]),
+                        ToLongArray(Tensor(values, operation.Inputs[1])),
+                        operation.Attribute("keepdim")?.AsBool() ?? false,
+                        ReduceOps.Kind.Max),
+                ];
+
+            case "min":
+                return
+                [
+                    ReduceOps.Reduce(
+                        Tensor(values, operation.Inputs[0]),
+                        ToLongArray(Tensor(values, operation.Inputs[1])),
+                        operation.Attribute("keepdim")?.AsBool() ?? false,
+                        ReduceOps.Kind.Min),
+                ];
+
+            case "any":
+                return
+                [
+                    ReduceOps.Reduce(
+                        Tensor(values, operation.Inputs[0]),
+                        operation.Attribute("axis")?.AsLongArray() ?? [],
+                        operation.Attribute("keepdim")?.AsBool() ?? false,
+                        ReduceOps.Kind.Any),
+                ];
+
+            case "topk":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                int k = (int)Tensor(values, operation.Inputs[1]).GetLong(0);
+                (PaddleTensor topValues, PaddleTensor indices) = ReduceOps.TopK(
+                    input,
+                    k,
+                    operation.Attribute("axis")?.AsInt() ?? -1,
+                    operation.Attribute("largest")?.AsBool() ?? true,
+                    operation.Attribute("sorted")?.AsBool() ?? true);
+                return [topValues, indices];
+            }
+
+            case "argsort":
+            {
+                (PaddleTensor sorted, PaddleTensor indices) = ReduceOps.ArgSort(
+                    Tensor(values, operation.Inputs[0]),
+                    operation.Attribute("axis")?.AsInt() ?? -1,
+                    operation.Attribute("descending")?.AsBool() ?? false,
+                    operation.Attribute("stable")?.AsBool() ?? false);
+                return [sorted, indices];
+            }
+
+            case "grid_sample":
+                return
+                [
+                    SamplingOps.GridSample(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        operation.Attribute("mode")?.AsString() ?? "bilinear",
+                        operation.Attribute("padding_mode")?.AsString() ?? "zeros",
+                        operation.Attribute("align_corners")?.AsBool() ?? true),
+                ];
+
+            case "bilinear_interp":
+            case "nearest_interp":
+            {
+                PaddleTensor input = Tensor(values, operation.Inputs[0]);
+                (int height, int width) = ResolveInterpolationSize(operation, values, input);
+                bool alignCorners = operation.Attribute("align_corners")?.AsBool() ?? false;
+                string format = operation.Attribute("data_format")?.AsString() ?? "NCHW";
+
+                return operation.Name == "bilinear_interp"
+                    ? [SamplingOps.BilinearInterp(
+                        input, height, width, alignCorners, operation.Attribute("align_mode")?.AsInt() ?? 0, format)]
+                    : [SamplingOps.NearestInterp(input, height, width, alignCorners, format)];
+            }
+
+            case "index_put":
+                return
+                [
+                    IndexOps.IndexPut(
+                        Tensor(values, operation.Inputs[0]),
+                        List(values, operation.Inputs[1]),
+                        Tensor(values, operation.Inputs[2]),
+                        operation.Attribute("accumulate")?.AsBool() ?? false),
+                ];
+
+            case "set_value_with_tensor_":
+                return
+                [
+                    IndexOps.SetValue(
+                        Tensor(values, operation.Inputs[0]),
+                        Tensor(values, operation.Inputs[1]),
+                        ToLongArray(Tensor(values, operation.Inputs[2])),
+                        ToLongArray(Tensor(values, operation.Inputs[3])),
+                        ToLongArray(Tensor(values, operation.Inputs[4])),
+                        operation.Attribute("axes")?.AsLongArray() ?? [],
+                        operation.Attribute("decrease_axes")?.AsLongArray() ?? [],
+                        operation.Attribute("none_axes")?.AsLongArray() ?? []),
+                ];
+
+            default:
+                throw new NotSupportedException(
+                    $"Paddle operator '{operation.Name}' is not implemented ({operation.StructName}).");
+        }
+    }
+
+    private static double Erf(double x)
+    {
+        // Abramowitz & Stegun 7.1.26; the graph only uses erf inside GELU.
+        double sign = x < 0 ? -1 : 1;
+        x = Math.Abs(x);
+        double t = 1.0 / (1.0 + (0.3275911 * x));
+        double y = 1.0 - ((((((((1.061405429 * t) - 1.453152027) * t) + 1.421413741) * t) - 0.284496736) * t)
+            + 0.254829592) * t * Math.Exp(-x * x);
+        return sign * y;
+    }
+
+    private static (int Height, int Width) ResolveInterpolationSize(
+        PirOperation operation,
+        object?[] values,
+        PaddleTensor input)
+    {
+        int height = operation.Attribute("out_h")?.AsInt() ?? -1;
+        int width = operation.Attribute("out_w")?.AsInt() ?? -1;
+
+        if (operation.Inputs.Length > 1 && operation.Inputs[1] > 0)
+        {
+            PaddleTensor size = Tensor(values, operation.Inputs[1]);
+            height = (int)size.GetLong(0);
+            width = (int)size.GetLong(1);
+        }
+
+        if (height > 0 && width > 0)
+        {
+            return (height, width);
+        }
+
+        double[] scale = operation.Attribute("scale")?.AsDoubleArray() ?? [];
+        double scaleY = scale.Length > 0 ? scale[0] : 1.0;
+        double scaleX = scale.Length > 1 ? scale[1] : scaleY;
+
+        return ((int)(input.Shape[2] * scaleY), (int)(input.Shape[3] * scaleX));
+    }
+
+    private static long[] AxisArgument(PirOperation operation, object?[] values, int inputIndex)
+    {
+        if (operation.Inputs.Length > inputIndex && operation.Inputs[inputIndex] > 0)
+        {
+            return ToLongArray(Tensor(values, operation.Inputs[inputIndex]));
+        }
+
+        return operation.Attribute("axis")?.AsLongArray() ?? operation.Attribute("axes")?.AsLongArray() ?? [];
+    }
+
+    /// <summary>
+    /// Resolves a reshape target, applying Paddle's two placeholders: <c>0</c> copies the input's
+    /// dimension at the same position and <c>-1</c> is inferred from the element count.
+    /// </summary>
+    private static int[] ResolveShape(PaddleTensor shapeTensor, PaddleTensor input)
+    {
+        int[] shape = new int[shapeTensor.Count];
+        int inferred = -1;
+        int known = 1;
+
+        for (int i = 0; i < shape.Length; i++)
+        {
+            int value = (int)shapeTensor.GetLong(i);
+            if (value == 0)
+            {
+                if (i >= input.Rank)
+                {
+                    throw new InvalidOperationException(
+                        $"Reshape uses the copy placeholder at axis {i} but the input has rank {input.Rank}.");
+                }
+
+                value = input.Shape[i];
+            }
+
+            shape[i] = value;
+            if (value < 0)
+            {
+                inferred = i;
+            }
+            else
+            {
+                known *= value;
+            }
+        }
+
+        if (inferred >= 0)
+        {
+            shape[inferred] = known == 0 ? 0 : input.Count / known;
+        }
+
+        return shape;
+    }
+
+    private static long[] ToLongArray(PaddleTensor tensor) =>
+        [.. Enumerable.Range(0, tensor.Count).Select(tensor.GetLong)];
+
+    private static PaddleTensor Fill(int[] shape, double value, PaddleDType dtype)
+    {
+        PaddleTensor result = PaddleTensor.Allocate(shape, dtype);
+        if (result.IsFloat)
+        {
+            result.FloatSpan.Fill((float)value);
+        }
+        else
+        {
+            result.IntSpan.Fill((long)value);
+        }
+
+        return result;
+    }
+
+    private static PaddleTensor Map(PaddleTensor input, Func<double, double> operation)
+    {
+        PaddleTensor result = PaddleTensor.Allocate([.. input.Shape], input.Dtype);
+        if (input.IsFloat)
+        {
+            ReadOnlySpan<float> source = input.FloatSpan;
+            Span<float> destination = result.FloatSpan;
+            for (int i = 0; i < source.Length; i++)
+            {
+                destination[i] = (float)operation(source[i]);
+            }
+        }
+        else
+        {
+            ReadOnlySpan<long> source = input.IntSpan;
+            Span<long> destination = result.IntSpan;
+            for (int i = 0; i < source.Length; i++)
+            {
+                destination[i] = (long)operation(source[i]);
+            }
+        }
+
+        return result;
+    }
+
+    private static PaddleTensor Tensor(object?[] values, int id) => values[id] switch
+    {
+        PaddleTensor tensor => tensor,
+        PaddleTensor[] list when list.Length == 1 => list[0],
+        null => throw new InvalidOperationException($"Value %{id} has not been produced."),
+        _ => throw new InvalidOperationException($"Value %{id} is a tensor list, not a tensor."),
+    };
+
+    private static PaddleTensor? Optional(object?[] values, int id) =>
+        id > 0 ? values[id] as PaddleTensor : null;
+
+    private static PaddleTensor[] List(object?[] values, int id) => values[id] switch
+    {
+        PaddleTensor[] list => list,
+        PaddleTensor tensor => [tensor],
+        _ => throw new InvalidOperationException($"Value %{id} is not a tensor list."),
+    };
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        _constants.Clear();
+        _parameters.Dispose();
+    }
+}
+
+/// <summary>Receives intermediate values while a program runs, for parity debugging.</summary>
+public interface IPirTrace
+{
+    /// <summary>Records the results of one operation.</summary>
+    /// <param name="index">Position of the operation in the program.</param>
+    /// <param name="operation">The operation that just ran.</param>
+    /// <param name="results">Its results; entries may be tensors, tensor lists or null.</param>
+    void Record(int index, PirOperation operation, object?[] results);
+}
