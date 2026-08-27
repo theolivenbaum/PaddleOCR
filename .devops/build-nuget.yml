@@ -1,0 +1,99 @@
+# Builds the C# port under dotnet/ and publishes three packages to NuGet:
+#
+#   PaddleOcrSharp        the library
+#   PaddleOcrSharp.Pdf    PDF page rasterisation
+#   PaddleOcrSharp.Cli    the `paddleocr-sharp` .NET tool
+#
+# Versioning is CalVer — yy.M.<build id mod 65536> — computed at run time, as in the other
+# Curiosity .NET repositories.
+
+variables:
+  solution:           './dotnet/PaddleOcrSharp.slnx'
+  libraryProject:     './dotnet/src/PaddleOcrSharp/PaddleOcrSharp.csproj'
+  pdfProject:         './dotnet/src/PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj'
+  toolProject:        './dotnet/src/PaddleOcrSharp.Cli/PaddleOcrSharp.Cli.csproj'
+  testProject:        './dotnet/tests/PaddleOcrSharp.Tests/PaddleOcrSharp.Tests.csproj'
+  buildConfiguration: 'Release'
+  targetVersion:      yy.M.$(build.buildId)
+
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+- task: NuGetToolInstaller@0
+
+- task: PowerShell@2
+  displayName: 'Create CalVer Version'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $dottedDate = (Get-Date).ToString("yy.M")
+      $buildID = $($env:BUILD_BUILDID)
+      $modBuildID = [int]$buildID % 65536  # ensure fits in int16
+      $newTargetVersion = "$dottedDate.$modBuildID"
+      Write-Host "##vso[task.setvariable variable=targetVersion;]$newTargetVersion"
+      Write-Host "Updated targetVersion to '$newTargetVersion'"
+
+- task: UseDotNet@2
+  displayName: 'Use .NET 10.0 SDK'
+  inputs:
+    packageType: sdk
+    version: 10.x
+    includePreviewVersions: false
+    installationPath: $(Agent.ToolsDirectory)/dotnet
+
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'restore'
+    projects: '$(solution)'
+  displayName: 'restore nuget'
+
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'build'
+    projects: '$(solution)'
+    arguments: '-c $(buildConfiguration) --no-restore /p:Version=$(targetVersion) /p:ContinuousIntegrationBuild=true'
+  displayName: 'build'
+
+# The parity tests skip themselves when the checkpoints and the generated .npz fixtures are
+# absent, so this is the unit-test half of the suite — a few seconds, and it fails the build
+# rather than shipping a broken package.
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'test'
+    projects: '$(testProject)'
+    arguments: '-c $(buildConfiguration) --no-build /p:Version=$(targetVersion)'
+  displayName: 'test'
+
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'pack'
+    packagesToPack: '$(libraryProject);$(pdfProject)'
+    versioningScheme: 'off'
+    configuration: '$(buildConfiguration)'
+    buildProperties: 'Version="$(targetVersion)";ContinuousIntegrationBuild="true"'
+    nobuild: true
+  displayName: 'pack libraries'
+
+# The tool package is the project's publish output, which `--no-build` does not produce, so
+# this one packs from source.
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'pack'
+    packagesToPack: '$(toolProject)'
+    versioningScheme: 'off'
+    configuration: '$(buildConfiguration)'
+    buildProperties: 'Version="$(targetVersion)";ContinuousIntegrationBuild="true"'
+    nobuild: false
+  displayName: 'pack dotnet tool'
+
+- task: NuGetCommand@2
+  inputs:
+    command: 'push'
+    packagesToPush: '$(Build.ArtifactStagingDirectory)/**/*.nupkg'
+    nuGetFeedType: 'external'
+    publishFeedCredentials: 'nuget-curiosity-org'
+  displayName: 'push nuget'

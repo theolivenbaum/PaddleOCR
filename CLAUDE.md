@@ -107,7 +107,8 @@ from another tensor's shape at run time arrives), or a scale; UVDoc uses the lis
 ```
 dotnet/
   PaddleOcrSharp.slnx
-  Directory.Build.props        # net10.0, unsafe, nullable, preview lang
+  Directory.Build.props        # net10.0, unsafe, nullable, preview lang, package metadata
+  Directory.Build.targets      # attaches the repository README to the packable projects
   src/
     PaddleOcrSharp/            # the library — everything below is here
       Core/                    # Tensor<T>, pooled buffers, SIMD kernels, GEMM
@@ -342,3 +343,13 @@ which swaps the red and blue weights and so decides which pixels of a formula su
    (renamed to `*.disabled`) for the duration of the port; do not re-enable them.
 5. Do not modify the upstream Python packages (`paddleocr/`, `ppocr/`, `ppstructure/`, …)
    — the port is additive and lives entirely under `dotnet/`.
+
+## Publishing
+
+`.devops/build-nuget.yml` builds, tests and publishes on `main`: `PaddleOcrSharp`,
+`PaddleOcrSharp.Pdf`, and `PaddleOcrSharp.Cli` — the last as a .NET tool, so
+`dotnet tool install -g PaddleOcrSharp.Cli` puts `paddleocr-sharp` on the PATH. Versions are
+CalVer (`yy.M.<build id mod 65536>`), stamped by the pipeline; `Directory.Build.props` carries
+0.1.0 for local packs. The tool package is the project's publish output — that is how the
+SkiaSharp and PDFium native assets get in — so it is the one project `dotnet pack --no-build`
+cannot pack.
