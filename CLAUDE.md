@@ -171,7 +171,10 @@ of its time to `conv2d` and the rest to the element-wise and shape operators aro
    line range in the C# doc-comment so the mapping is auditable.
 2. Land work in vertical slices that build and test green. Track progress in
    [`to-do.md`](to-do.md).
-3. Upstream CI, pre-commit hooks and agent skill files in this repository are **disabled**
+3. Where a stage cannot be reproduced exactly — OpenCV's SIMD rounding, OpenCV's Hershey font
+   for the table-figure placeholders — say so in the doc comment and pin down what *is*
+   guaranteed instead.
+4. Upstream CI, pre-commit hooks and agent skill files in this repository are **disabled**
    (renamed to `*.disabled`) for the duration of the port; do not re-enable them.
-4. Do not modify the upstream Python packages (`paddleocr/`, `ppocr/`, `ppstructure/`, …)
+5. Do not modify the upstream Python packages (`paddleocr/`, `ppocr/`, `ppstructure/`, …)
    — the port is additive and lives entirely under `dotnet/`.

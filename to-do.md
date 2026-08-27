@@ -109,7 +109,7 @@ orientation classifier.*
 - [x] Block cropping, adjacent-block merging (`merge_blocks`)
 - [x] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
       `Chart Recognition:`, `Seal Recognition:`, `Spotting:` with per-label pixel budgets
-- [ ] Table figure tokenisation / untokenisation (`tokenize_figure_of_table`) — figures embedded inside a table cell
+- [x] Table figure tokenisation / untokenisation (`tokenize_figure_of_table`)
 - [~] Batched VL recognition scheduling (blocks run sequentially or across `BlockConcurrency` threads; upstream batches by pixel budget)
 - [x] OTSL → HTML table conversion
 - [x] Repetition truncation (`truncate_repetitive_content`)

@@ -122,27 +122,38 @@ public static partial class MarkdownWriter
     }
 
     /// <summary>
-    /// Promotes a leading keyword such as <c>Abstract</c> to a heading and keeps the rest as body.
+    /// Promotes a leading keyword such as <c>Abstract</c> to a heading and leaves the rest alone.
     /// </summary>
+    /// <remarks>
+    /// Port of <c>format_first_line</c>: split on the delimiter, find the first non-blank piece,
+    /// and reformat it only when it equals one of the templates. Anything else — including a piece
+    /// that merely starts with the keyword — is left as it was, and the pieces are re-joined with
+    /// the same delimiter.
+    /// </remarks>
     private static string FormatFirstLine(
         string content,
         string[] templates,
         Func<string, string> format,
         char splitter)
     {
-        int index = content.IndexOf(splitter);
-        string first = index < 0 ? content : content[..index];
-        string rest = index < 0 ? string.Empty : content[(index + 1)..];
+        string[] pieces = content.Split(splitter);
 
-        foreach (string template in templates)
+        for (int i = 0; i < pieces.Length; i++)
         {
-            if (first.Trim().StartsWith(template, StringComparison.OrdinalIgnoreCase))
+            if (pieces[i].Trim().Length == 0)
             {
-                return format(first.Trim()) + rest;
+                continue;
             }
+
+            if (templates.Contains(pieces[i].ToLowerInvariant()))
+            {
+                pieces[i] = format(pieces[i]);
+            }
+
+            break;
         }
 
-        return NormalizeNewlines(content);
+        return string.Join(splitter, pieces);
     }
 
     /// <summary>Joins a formula with its equation number, as upstream's helper does.</summary>

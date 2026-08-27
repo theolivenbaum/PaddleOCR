@@ -33,6 +33,12 @@ public sealed record DocumentParserOptions
     /// <summary>Whether adjacent blocks of the same label are merged before recognition.</summary>
     public bool MergeLayoutBlocks { get; init; } = true;
 
+    /// <summary>
+    /// Whether figures inside a table are replaced by placeholder tokens before recognition and
+    /// turned back into image references afterwards.
+    /// </summary>
+    public bool TokenizeTableFigures { get; init; } = true;
+
     /// <summary>Layout detection settings.</summary>
     public LayoutOptions Layout { get; init; } = LayoutOptions.Default;
 

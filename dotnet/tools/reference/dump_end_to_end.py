@@ -18,9 +18,10 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 
-from _common import load_model, load_processor, save, text_image  # noqa: E402
+from _common import load_model, load_processor, save, table_page, text_image  # noqa: E402
 
 LAYOUT_DIR = os.environ.get("PP_DOCLAYOUT_V3_DIR", "/home/user/ref/layout")
+PADDLEX_DIR = os.environ.get("PADDLEX_DIR", "/home/user/ref/PaddleX")
 TARGET = 800
 THRESHOLD = 0.3
 
@@ -47,6 +48,57 @@ PROMPTS = {
     "display_formula": "Formula Recognition:",
     "inline_formula": "Formula Recognition:",
 }
+
+
+def load_pipeline_helpers():
+    """Loads the pipeline's post-processing helpers without importing all of PaddleX.
+
+    `uilts.py` pulls in the whole inference stack when imported normally, but the OTSL conversion
+    and the repetition guard are self-contained, so the relevant slice is executed on its own.
+    """
+    import itertools
+    import re
+    import types
+    from collections import Counter
+    from typing import Any, Dict, List, Tuple, Union
+
+    import html
+    from pydantic import BaseModel, computed_field, model_validator
+
+    source = open(
+        os.path.join(PADDLEX_DIR, "paddlex/inference/pipelines/paddleocr_vl/uilts.py"),
+        encoding="utf-8",
+    ).read()
+    start = source.index("class TableCell(BaseModel):")
+    end = source.index("def crop_margin(")
+
+    module = types.ModuleType("paddleocr_vl_uilts_slice")
+    sys.modules[module.__name__] = module
+
+    namespace = module.__dict__
+    namespace.update({
+        "BaseModel": BaseModel,
+        "computed_field": computed_field,
+        "model_validator": model_validator,
+        "itertools": itertools,
+        "re": re,
+        "html": html,
+        "Counter": Counter,
+        "Any": Any,
+        "Dict": Dict,
+        "List": List,
+        "Tuple": Tuple,
+        "Union": Union,
+    })
+
+    exec(compile(source[start:end], "uilts.py", "exec"), namespace)
+
+    # The models were defined inside an exec'd namespace, so pydantic has to be told where to
+    # resolve their annotations from before they can be instantiated.
+    namespace["TableCell"].model_rebuild(_types_namespace=namespace)
+    namespace["TableData"].model_rebuild(_types_namespace=namespace)
+
+    return namespace["convert_otsl_to_html"], namespace["truncate_repetitive_content"]
 
 
 def detect(rgb: np.ndarray):
@@ -87,10 +139,14 @@ def detect(rgb: np.ndarray):
 
 
 def main() -> None:
+    run("end_to_end.npz", text_image(PAGE_LINES, width=980, font_size=30))
+    run("end_to_end_table.npz", table_page())
+
+
+def run(fixture: str, page) -> None:
     import torch
     from PIL import Image
 
-    page = text_image(PAGE_LINES, width=980, font_size=30)
     rgb = np.asarray(page, dtype=np.uint8)
 
     boxes = detect(rgb)
@@ -98,6 +154,7 @@ def main() -> None:
 
     processor = load_processor()
     model = load_model("float32")
+    convert_otsl_to_html, truncate_repetitive_content = load_pipeline_helpers()
 
     contents = []
     records = []
@@ -121,6 +178,16 @@ def main() -> None:
             new_tokens = generated[0, batch["input_ids"].shape[1]:]
             content = processor.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
+            # Apply the same post-processing the pipeline does, so the fixture holds the
+            # pipeline's block content rather than the model's raw output.
+            content = truncate_repetitive_content(
+                content, min_count=5000 if label == "table" else 50
+            )
+            if label == "table":
+                html_str = convert_otsl_to_html(content)
+                if html_str != "":
+                    content = html_str
+
             print(f"  {label} [{x1},{y1},{x2},{y2}] -> {content!r}")
             contents.append(content)
             records.append([int(row[0]), float(row[1]), x1, y1, x2, y2, int(row[6])])
@@ -133,7 +200,7 @@ def main() -> None:
     for index, content in enumerate(contents):
         payload[f"content{index}"] = np.frombuffer(content.encode("utf-8"), dtype=np.uint8)
 
-    save("end_to_end.npz", **payload)
+    save(fixture, **payload)
 
 
 if __name__ == "__main__":

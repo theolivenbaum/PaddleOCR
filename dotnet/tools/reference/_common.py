@@ -112,3 +112,58 @@ SAMPLE_LINES = [
     "The quick brown fox jumps over",
     "the lazy dog. 0123456789",
 ]
+
+
+def table_page(width=1000, font_size=26, margin=30):
+    """Renders a title, a paragraph and a ruled table, so the pipeline sees more than plain text."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype(TEXT_FONT, font_size)
+    bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+    line_height = int(font_size * 1.5)
+
+    header = ["Model", "Params", "Score"]
+    rows = [
+        ["PaddleOCR-VL", "0.9B", "92.6"],
+        ["Baseline A", "2.1B", "88.1"],
+        ["Baseline B", "7.0B", "90.4"],
+    ]
+
+    columns = [margin, margin + 340, margin + 560, margin + 760]
+    table_top = margin + line_height * 5
+    row_height = int(font_size * 1.9)
+    height = table_top + row_height * (len(rows) + 1) + margin * 2
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+
+    draw.text((margin, margin), "Benchmark Results", fill=(0, 0, 0), font=bold)
+    draw.text(
+        (margin, margin + line_height * 2),
+        "The table below compares the models we evaluated on the",
+        fill=(0, 0, 0),
+        font=font,
+    )
+    draw.text(
+        (margin, margin + line_height * 3),
+        "internal document parsing benchmark.",
+        fill=(0, 0, 0),
+        font=font,
+    )
+
+    for index, label in enumerate(header):
+        draw.text((columns[index] + 10, table_top + 8), label, fill=(0, 0, 0), font=bold)
+
+    for r, row in enumerate(rows):
+        y = table_top + row_height * (r + 1)
+        for index, cell in enumerate(row):
+            draw.text((columns[index] + 10, y + 8), cell, fill=(0, 0, 0), font=font)
+
+    bottom = table_top + row_height * (len(rows) + 1)
+    for r in range(len(rows) + 2):
+        y = table_top + row_height * r
+        draw.line([(columns[0], y), (columns[-1], y)], fill=(0, 0, 0), width=2)
+    for x in columns:
+        draw.line([(x, table_top), (x, bottom)], fill=(0, 0, 0), width=2)
+
+    return image

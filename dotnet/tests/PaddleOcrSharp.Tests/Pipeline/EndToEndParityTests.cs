@@ -15,17 +15,17 @@ namespace PaddleOcrSharp.Tests.Pipeline;
 [Collection(CheckpointCollection.Name)]
 public class EndToEndParityTests(CheckpointFixture checkpoint)
 {
-    private const string FixtureName = "end_to_end.npz";
-
-    [Fact]
-    public void PageParseMatchesUpstream()
+    [Theory]
+    [InlineData("end_to_end.npz")]
+    [InlineData("end_to_end_table.npz")]
+    public void PageParseMatchesUpstream(string fixtureName)
     {
-        Fixture.RequireOrSkip(FixtureName);
+        Fixture.RequireOrSkip(fixtureName);
         checkpoint.RequireOrSkip();
         CheckpointFixture.RequireTokenizerOrSkip();
         LayoutModelFixture.RequireOrSkip();
 
-        var fixtures = Fixture.Load(FixtureName);
+        var fixtures = Fixture.Load(fixtureName);
         var source = fixtures["source"];
         float[] boxes = fixtures["boxes"].ToFloats();
         int blockCount = (int)fixtures["block_count"].ToInt64()[0];

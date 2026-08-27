@@ -133,12 +133,22 @@ public sealed class DocumentParser : IDisposable
                 sizes[i] = (crops[i].Width, crops[i].Height);
             }
 
+            string?[] figurePaths = new string?[regions.Count];
+            for (int i = 0; i < regions.Count; i++)
+            {
+                if (IsImageBlock(regions[i].Label, settings))
+                {
+                    figurePaths[i] = FigurePath(regions[i], i);
+                }
+            }
+
             IReadOnlyCollection<string> nonMergeLabels = NonMergeLabels(settings);
             List<BlockGroup> groups = settings.MergeLayoutBlocks && regions.Count > 1
                 ? BlockMerger.Group(regions, sizes, nonMergeLabels)
                 : [.. Enumerable.Range(0, regions.Count).Select(i => new BlockGroup([i], []))];
 
             var blocks = new ParsedBlock[regions.Count];
+            var absorbed = new HashSet<int>();
             int completed = 0;
 
             void RecognizeGroup(int groupIndex)
@@ -154,7 +164,43 @@ public sealed class DocumentParser : IDisposable
                     : ImageStacker.Stack(
                         [.. group.Indices.Select(index => crops[index])], group.Alignments);
 
-                blocks[primary] = Recognize(merged, region, primary, settings, cancellationToken);
+                IReadOnlyList<TokenizedFigure> tokenized = [];
+                RgbImage prepared = merged;
+
+                if (region.Label == "table" && settings.TokenizeTableFigures)
+                {
+                    (prepared, tokenized) = TableFigureTokenizer.Tokenize(
+                        merged, region, regions, figurePaths);
+                }
+
+                try
+                {
+                    blocks[primary] = Recognize(prepared, region, primary, settings, cancellationToken);
+                }
+                finally
+                {
+                    if (!ReferenceEquals(prepared, merged))
+                    {
+                        prepared.Dispose();
+                    }
+                }
+
+                if (tokenized.Count > 0)
+                {
+                    blocks[primary] = blocks[primary] with
+                    {
+                        Content = TableFigureTokenizer.Untokenize(
+                            blocks[primary].Content, tokenized, settings.Markdown.ImageDirectory),
+                    };
+
+                    lock (absorbed)
+                    {
+                        foreach (TokenizedFigure figure in tokenized)
+                        {
+                            absorbed.Add(figure.RegionIndex);
+                        }
+                    }
+                }
 
                 // Every region of a merged group keeps its box so the JSON still describes the
                 // page, but only the first carries the recognised text.
@@ -189,7 +235,13 @@ public sealed class DocumentParser : IDisposable
                 }
             }
 
-            return new ParsedPage(pageIndex, page.Width, page.Height, blocks);
+            // Figures that a table absorbed are described inside its HTML, so they no longer
+            // belong to the page as separate blocks.
+            IReadOnlyList<ParsedBlock> retained = absorbed.Count == 0
+                ? blocks
+                : [.. blocks.Where((_, index) => !absorbed.Contains(index))];
+
+            return new ParsedPage(pageIndex, page.Width, page.Height, retained);
         }
         finally
         {
@@ -233,7 +285,7 @@ public sealed class DocumentParser : IDisposable
             return new ParsedBlock(region.Label, region, string.Empty, region.ReadingOrder)
             {
                 Image = ImageIO.EncodePng(crop),
-                ImagePath = $"{region.Label}_{index}_{(int)region.Left}_{(int)region.Top}.png",
+                ImagePath = FigurePath(region, index),
             };
         }
 
@@ -302,6 +354,10 @@ public sealed class DocumentParser : IDisposable
 
         return crop.Clone();
     }
+
+    /// <summary>File name a figure block is written to.</summary>
+    private static string FigurePath(LayoutBox region, int index) =>
+        $"{region.Label}_{index}_{(int)region.Left}_{(int)region.Top}.png";
 
     private static bool IsImageBlock(string label, DocumentParserOptions options)
     {
