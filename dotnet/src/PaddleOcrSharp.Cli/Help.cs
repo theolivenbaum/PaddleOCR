@@ -50,6 +50,8 @@ public static class Help
               --max-pixels <n>        Upper pixel budget (default: 1003520)
               --<kind>-max-pixels <n> Per-label ceiling, overriding --max-pixels; <kind> is one
                                       of ocr, table, chart, formula, seal
+              --merge-tables          Rejoin tables split across a page break
+              --title-levels          Set heading depth from the whole document
               --output <path>         Write the result to a file instead of stdout
 
             bench options:

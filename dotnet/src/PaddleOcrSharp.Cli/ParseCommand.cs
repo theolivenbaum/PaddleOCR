@@ -141,7 +141,7 @@ public static class ParseCommand
         if (outputDirectory is null)
         {
             string format = command.Get("format", "markdown")!;
-            var document = new ParsedDocument(pages);
+            var document = Restructure(new ParsedDocument(pages), command);
             Console.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
                 ? ToJson(pages)
                 : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!));
@@ -205,6 +205,28 @@ public static class ParseCommand
             await File.WriteAllBytesAsync(
                 Path.Combine(imageDirectory, block.ImagePath), block.Image, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Applies the document-level restructuring, which needs every page in hand.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, as upstream leaves it to the caller: it rewrites content across page
+    /// boundaries, and a caller reading pages one at a time should not have it happen silently.
+    /// </remarks>
+    private static ParsedDocument Restructure(ParsedDocument document, CommandLine command)
+    {
+        if (command.GetBool("merge-tables", false))
+        {
+            document = document.MergeTablesAcrossPages();
+        }
+
+        if (command.GetBool("title-levels", false))
+        {
+            document = document.AssignTitleLevels();
+        }
+
+        return document;
     }
 
     /// <summary>Reads a per-label pixel ceiling, leaving it unset when the flag is absent.</summary>

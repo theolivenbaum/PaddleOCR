@@ -29,6 +29,17 @@ public sealed record ParsedBlock(string Label, LayoutBox Box, string Content, in
     /// </remarks>
     public int? GroupId { get; init; }
 
+    /// <summary>
+    /// How deep the heading sits in the document's structure, once
+    /// <see cref="ParsedDocument.AssignTitleLevels"/> has worked it out.
+    /// </summary>
+    /// <remarks>
+    /// <c>title_level</c>. Only <c>paragraph_title</c> blocks get one, and only after the whole
+    /// document is in hand; the markdown falls back to reading the heading's own numbering when
+    /// it is absent.
+    /// </remarks>
+    public int? TitleLevel { get; init; }
+
     /// <summary>Encoded image bytes when the block is a figure kept as an image.</summary>
     public byte[]? Image { get; init; }
 
@@ -67,6 +78,16 @@ public sealed record ParsedDocument(IReadOnlyList<ParsedPage> Pages)
     /// whole document is in hand.
     /// </remarks>
     public ParsedDocument MergeTablesAcrossPages() => this with { Pages = TableMerger.Apply(Pages) };
+
+    /// <summary>
+    /// Works out how deep each heading sits in the document's structure.
+    /// </summary>
+    /// <remarks>
+    /// <c>restructure_pages(relevel_titles=True)</c>. Like table merging it needs the whole
+    /// document: a heading's depth is decided partly by how its size compares with every other
+    /// heading's.
+    /// </remarks>
+    public ParsedDocument AssignTitleLevels() => this with { Pages = TitleLevels.Apply(Pages) };
 
     /// <summary>
     /// Renders the whole document as markdown.

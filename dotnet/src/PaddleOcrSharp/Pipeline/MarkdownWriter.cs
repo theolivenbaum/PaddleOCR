@@ -92,7 +92,9 @@ public static partial class MarkdownWriter
         block.Label switch
         {
             "doc_title" => CollapseSoftNewlines($"# {content}"),
-            "paragraph_title" => FormatTitle(content),
+            "paragraph_title" => block.TitleLevel is int level
+                ? CollapseSoftNewlines($"{new string('#', level + 1)} {content}")
+                : FormatTitle(content),
             "abstract_title" or "reference_title" or "content_title" => FormatPlainTitle(content),
             "table_title" or "figure_title" or "chart_title" => FormatText(content, options),
             "table" => FormatTable(content, options),
