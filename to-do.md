@@ -23,7 +23,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] SIMD element-wise kernels: add, mul, silu, gelu(erf), gelu(tanh), softmax (fp32 accum), rsqrt
 - [x] `RmsNorm`, `LayerNorm` (fp32 accumulation, matching upstream precision)
 - [x] GEMM: blocked, multi-threaded, bf16-weight × fp32-activation with on-the-fly tile conversion
-- [ ] Attention primitive: scaled dot-product with causal / block-diagonal masks, fp32 softmax
+- [x] Attention primitive: scaled dot-product with causal / block-diagonal masks, fp32 softmax
 - [x] Unit tests for every kernel against a naive scalar reference
 
 ## 2. Weight formats — `src/PaddleOcrSharp/Formats`
@@ -31,14 +31,14 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] `SafetensorsFile`: header parse, memory-mapped tensor views, lazy dtype-aware access
 - [ ] Paddle `inference.pdiparams` + `inference.json` reader (for `PP-DocLayoutV3`)
 - [x] `.npz` reader/writer (test fixtures only)
-- [ ] Weight-name mapping tables (HF ⇄ internal module tree)
+- [x] Weight-name mapping tables (HF ⇄ internal module tree)
 
 ## 3. Model downloader — `src/PaddleOcrSharp/Download`
 
-- [ ] Hugging Face resolve-URL downloader: ranged resume, SHA-256/etag verify, parallel chunks
-- [ ] Local cache layout (`~/.cache/paddleocr-sharp/<repo>/<revision>/`) with lockfile
-- [ ] Mirror support (HF endpoint override, BOS/AIStudio)
-- [ ] Manifests for `PaddleOCR-VL-1.6`, `PP-DocLayoutV3`, `PP-LCNet_x1_0_doc_ori`, `UVDoc`
+- [x] Hugging Face resolve-URL downloader: ranged resume, SHA-256/etag verify, parallel chunks
+- [x] Local cache layout (`~/.cache/paddleocr-sharp/<repo>/<revision>/`) with lockfile
+- [x] Mirror support (HF endpoint override, BOS/AIStudio)
+- [x] Manifests for `PaddleOCR-VL-1.6`, `PP-DocLayoutV3`, `PP-LCNet_x1_0_doc_ori`, `UVDoc`
 - [ ] `paddleocr-sharp download` CLI verb + progress reporting
 - [ ] Tests: manifest resolution, cache hit/miss, resume, corrupt-file detection
 
@@ -55,32 +55,32 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 5. Vision tower — `src/PaddleOcrSharp/Models/Vision`
 
-- [ ] Patch embedding (Conv2d 14×14 stride 14 → GEMM)
-- [ ] Bilinear interpolation of the 27×27 position grid (`align_corners=false`) + LFU cache
-- [ ] 2-D RoPE (`SigLIPRotaryEmbedding`) and `rotate_half` application
-- [ ] Encoder layer (LN → MHA → LN → MLP) ×27, block-diagonal attention over packed images
-- [ ] `post_layernorm`, per-image split by `cu_seqlens`
-- [ ] Projector `mlp_AR` (pre-norm, 2×2 merge, 4608→4608→1024)
-- [ ] Parity tests: per-layer hidden states vs. Python dumps (rtol ≤ 2e-2 in bf16)
+- [x] Patch embedding (Conv2d 14×14 stride 14 → GEMM)
+- [x] Bilinear interpolation of the 27×27 position grid (`align_corners=false`) + LFU cache
+- [x] 2-D RoPE (`SigLIPRotaryEmbedding`) and `rotate_half` application
+- [x] Encoder layer (LN → MHA → LN → MLP) ×27, block-diagonal attention over packed images
+- [x] `post_layernorm`, per-image split by `cu_seqlens`
+- [x] Projector `mlp_AR` (pre-norm, 2×2 merge, 4608→4608→1024)
+- [x] Parity tests: per-layer hidden states vs. Python dumps (rtol ≤ 2e-2 in bf16)
 
 ## 6. Language model — `src/PaddleOcrSharp/Models/Language`
 
-- [ ] Token embedding + `lm_head`
-- [ ] `Ernie4_5Attention` with GQA and 3-D M-RoPE (`mrope_section [16,24,24]`, θ 500 000)
-- [ ] `Ernie4_5MLP` (SwiGLU) and `RMSNorm`
-- [ ] Paged/contiguous KV cache with pooling; prefill + incremental decode
-- [ ] `get_rope_index` port (image grid ↔ text position ids)
-- [ ] Sampling: greedy, temperature, top-p, repetition penalty
-- [ ] Stop conditions (`</s>`), max-new-tokens, repetition-collapse guard
-- [ ] Parity tests: logits after prefill, then 16 greedy steps vs. Python
+- [x] Token embedding + `lm_head`
+- [x] `Ernie4_5Attention` with GQA and 3-D M-RoPE (`mrope_section [16,24,24]`, θ 500 000)
+- [x] `Ernie4_5MLP` (SwiGLU) and `RMSNorm`
+- [x] Paged/contiguous KV cache with pooling; prefill + incremental decode
+- [x] `get_rope_index` port (image grid ↔ text position ids)
+- [x] Sampling: greedy, temperature, top-p, repetition penalty
+- [x] Stop conditions (`</s>`), max-new-tokens, repetition-collapse guard
+- [x] Parity tests: logits after prefill, then 16 greedy steps vs. Python
 
 ## 7. Tokenizer — `src/PaddleOcrSharp/Text`
 
-- [ ] `tokenizer.json` reader (vocab, merges, added tokens, normalizer, pre-tokenizer)
-- [ ] BPE encode/decode with added-token splitting (1019 special tokens incl. `<|LOC_n|>`)
-- [ ] Chat-template rendering for the fixed PaddleOCR-VL prompt shape (no Jinja engine)
-- [ ] Image-placeholder expansion (`grid.prod() / merge² ` placeholders)
-- [ ] Parity tests vs. `tokenizers` on a multilingual corpus
+- [x] `tokenizer.json` reader (vocab, merges, added tokens, normalizer, pre-tokenizer)
+- [x] BPE encode/decode with added-token splitting (1019 special tokens incl. `<|LOC_n|>`)
+- [x] Chat-template rendering for the fixed PaddleOCR-VL prompt shape (no Jinja engine)
+- [x] Image-placeholder expansion (`grid.prod() / merge² ` placeholders)
+- [x] Parity tests vs. `tokenizers` on a multilingual corpus
 
 ## 8. Layout detection — `src/PaddleOcrSharp/Models/Layout`
 
@@ -123,9 +123,9 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 ## 12. Reference tooling — `dotnet/tools/reference`
 
 - [x] `dump_image_processing.py`
-- [ ] `dump_vision.py` (per-layer hidden states)
-- [ ] `dump_language.py` (logits, KV cache, greedy steps)
-- [ ] `dump_tokenizer.py`
+- [x] `dump_vision.py` (per-layer hidden states)
+- [x] `dump_language.py` (logits, KV cache, greedy steps)
+- [x] `dump_tokenizer.py`
 - [ ] `dump_layout.py`
 - [ ] `dump_end_to_end.py`
 - [ ] README describing fixture generation

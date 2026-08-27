@@ -18,7 +18,10 @@ public readonly record struct ImageGrid(int Temporal, int Height, int Width)
 /// <summary>One image, patchified and normalised, ready for the vision tower.</summary>
 public sealed class PreprocessedImage : IDisposable
 {
-    internal PreprocessedImage(Tensor pixelValues, ImageGrid grid)
+    /// <summary>Wraps already-patchified pixel values.</summary>
+    /// <param name="pixelValues">Patches as <c>[patchCount, channels × patchSize × patchSize]</c>.</param>
+    /// <param name="grid">Patch grid the values describe.</param>
+    public PreprocessedImage(Tensor pixelValues, ImageGrid grid)
     {
         PixelValues = pixelValues;
         Grid = grid;

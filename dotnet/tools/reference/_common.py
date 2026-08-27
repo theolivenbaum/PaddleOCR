@@ -49,12 +49,22 @@ def load_model(dtype: str = "float32"):
     from transformers import AutoModelForCausalLM
 
     torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[dtype]
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_DIR,
-        dtype=torch_dtype,
-        trust_remote_code=True,
-        attn_implementation="eager",
-    )
+
+    # `torch_dtype` was renamed to `dtype` in transformers 4.56; accept either.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_DIR,
+            dtype=torch_dtype,
+            trust_remote_code=True,
+            attn_implementation="eager",
+        )
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_DIR,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+            attn_implementation="eager",
+        )
     model.eval()
     return model
 
@@ -77,3 +87,28 @@ def synthetic_image(width: int, height: int, seed: int = 0):
     ramp = (np.sin(xx / 17.0) * 60 + np.cos(yy / 11.0) * 60 + 128).astype(np.int32)
     blended = ((base.astype(np.int32) * 0.35) + (ramp[..., None] * 0.65)).clip(0, 255)
     return Image.fromarray(blended.astype(np.uint8), mode="RGB")
+
+
+TEXT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
+def text_image(lines, width=760, font_size=28, margin=24):
+    """Renders black text on white, so end-to-end runs have something real to read."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype(TEXT_FONT, font_size)
+    line_height = int(font_size * 1.45)
+    height = margin * 2 + line_height * len(lines)
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for index, line in enumerate(lines):
+        draw.text((margin, margin + index * line_height), line, fill=(0, 0, 0), font=font)
+    return image
+
+
+SAMPLE_LINES = [
+    "PaddleOCR-VL pure C# port",
+    "The quick brown fox jumps over",
+    "the lazy dog. 0123456789",
+]
