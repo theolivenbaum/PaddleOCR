@@ -90,13 +90,33 @@ public static class ConvOps
                         kernelHeight, kernelWidth, strides, dilations, padTop, padLeft,
                         oy, outWidth, columns);
 
-                    for (int oc = 0; oc < outGroupChannels; oc++)
+                    // One column at a time, four filters at a time: the column stays in L1 while
+                    // the filters stream past.
+                    ReadOnlySpan<float> filters = weightArray.AsSpan(weightBase, outGroupChannels * patch);
+                    int planeStride = outHeight * outWidth;
+                    int rowOffset = outputBase + (oy * outWidth);
+
+                    for (int ox = 0; ox < outWidth; ox++)
                     {
-                        ReadOnlySpan<float> filter = weightArray.AsSpan(weightBase + (oc * patch), patch);
-                        int rowBase = outputBase + (oc * outHeight * outWidth) + (oy * outWidth);
-                        for (int ox = 0; ox < outWidth; ox++)
+                        ReadOnlySpan<float> patchColumn = columns.Slice(ox * patch, patch);
+                        int oc = 0;
+
+                        for (; oc <= outGroupChannels - 4; oc += 4)
                         {
-                            result.Floats![rowBase + ox] = Gemm.Dot(columns.Slice(ox * patch, patch), filter);
+                            Gemm.Dot4(
+                                patchColumn, filters, oc * patch, patch,
+                                out float a0, out float a1, out float a2, out float a3);
+
+                            result.Floats![rowOffset + (oc * planeStride) + ox] = a0;
+                            result.Floats![rowOffset + ((oc + 1) * planeStride) + ox] = a1;
+                            result.Floats![rowOffset + ((oc + 2) * planeStride) + ox] = a2;
+                            result.Floats![rowOffset + ((oc + 3) * planeStride) + ox] = a3;
+                        }
+
+                        for (; oc < outGroupChannels; oc++)
+                        {
+                            result.Floats![rowOffset + (oc * planeStride) + ox] =
+                                Gemm.Dot(patchColumn, filters.Slice(oc * patch, patch));
                         }
                     }
 

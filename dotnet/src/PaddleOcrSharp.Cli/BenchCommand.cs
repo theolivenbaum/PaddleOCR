@@ -2,6 +2,8 @@ using System.Diagnostics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
+using PaddleOcrSharp.Models.Layout;
+using PaddleOcrSharp.Models.Paddle;
 
 namespace PaddleOcrSharp.Cli;
 
@@ -69,7 +71,45 @@ public static class BenchCommand
                 $"{generated.Count} tokens ({allocated / (1024.0 * 1024.0):F1} MiB allocated)");
         }
 
+        if (command.GetBool("layout", true))
+        {
+            await BenchmarkLayoutAsync(command, source, iterations).ConfigureAwait(false);
+        }
+
         return 0;
+    }
+
+    /// <summary>Times the layout graph and reports which operators dominate it.</summary>
+    private static async Task BenchmarkLayoutAsync(CommandLine command, RgbImage page, int iterations)
+    {
+        string directory;
+        try
+        {
+            directory = await ModelLocator.ResolveLayoutAsync(command, allowDownload: false).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Skipping layout benchmark: {exception.Message}");
+            return;
+        }
+
+        using LayoutDetector detector = LayoutDetector.Load(directory);
+        var clock = Stopwatch.StartNew();
+
+        for (int i = 0; i < iterations; i++)
+        {
+            var profile = new PirProfile();
+            clock.Restart();
+            IReadOnlyList<LayoutBox> boxes = detector.Detect(page, LayoutOptions.Default, profile);
+            Console.WriteLine(
+                $"Layout  [{i}]: {clock.Elapsed.TotalMilliseconds:F0}ms, {boxes.Count} regions");
+
+            if (i == iterations - 1)
+            {
+                Console.WriteLine();
+                Console.WriteLine(profile.Report());
+            }
+        }
     }
 
     private static RgbImage Synthetic(int width, int height)

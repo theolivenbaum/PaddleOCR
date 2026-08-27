@@ -182,8 +182,12 @@ public sealed class PirProgram
             };
         }
 
+        // Tags are "<dialect-version>.<op>". Version 0 is the builtin dialect and version 1 the
+        // pd_op dialect, and both define a `split`, so the dialect has to survive into the name.
         int dot = tag.IndexOf('.');
-        string opName = dot >= 0 ? tag[(dot + 1)..] : tag;
+        string opName = dot < 0
+            ? tag
+            : tag[..dot] == "0" ? "builtin." + tag[(dot + 1)..] : tag[(dot + 1)..];
 
         var inputs = new List<int>();
         if (element.TryGetProperty("I", out JsonElement inputElement)

@@ -29,7 +29,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 ## 2. Weight formats — `src/PaddleOcrSharp/Formats`
 
 - [x] `SafetensorsFile`: header parse, memory-mapped tensor views, lazy dtype-aware access
-- [ ] Paddle `inference.pdiparams` + `inference.json` reader (for `PP-DocLayoutV3`)
+- [x] Paddle `inference.pdiparams` + `inference.json` reader (for `PP-DocLayoutV3`)
 - [x] `.npz` reader/writer (test fixtures only)
 - [x] Weight-name mapping tables (HF ⇄ internal module tree)
 
@@ -39,7 +39,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] Local cache layout (`~/.cache/paddleocr-sharp/<repo>/<revision>/`) with lockfile
 - [x] Mirror support (HF endpoint override, BOS/AIStudio)
 - [x] Manifests for `PaddleOCR-VL-1.6`, `PP-DocLayoutV3`, `PP-LCNet_x1_0_doc_ori`, `UVDoc`
-- [ ] `paddleocr-sharp download` CLI verb + progress reporting
+- [x] `paddleocr-sharp download` CLI verb + progress reporting
 - [ ] Tests: manifest resolution, cache hit/miss, resume, corrupt-file detection
 
 ## 4. Imaging — `src/PaddleOcrSharp/Imaging`
@@ -50,7 +50,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] Bicubic resample matching PIL/`torchvision` (a = −0.5, antialias behaviour verified)
 - [x] Rescale + normalize + HWC→CHW, fused and vectorised
 - [x] Patchify to `(grid_h*grid_w, 3, 14, 14)` and grid-THW computation
-- [ ] `crop_margin`, seal/spotting pre-processing helpers
+- [x] `crop_margin`, seal/spotting pre-processing helpers
 - [x] Parity tests vs. Python `image_processing_paddleocr_vl.PaddleOCRVLImageProcessor`
 
 ## 5. Vision tower — `src/PaddleOcrSharp/Models/Vision`
@@ -84,13 +84,18 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 8. Layout detection — `src/PaddleOcrSharp/Models/Layout`
 
-- [ ] Decide weight source: convert `inference.pdiparams` → safetensors, or read Paddle blob directly
-- [ ] HGNetV2-L backbone (stem, stages, LearnableAffineBlock)
-- [ ] Hybrid encoder (AIFI transformer level + CCFM/PAN fusion)
-- [ ] Deformable-DETR decoder (300 queries, 6 layers, 4 sample points)
-- [ ] Post-process: sigmoid scores, box decode, threshold 0.3, NMS, unclip, label map
-- [ ] Reading-order / mask heads as far as the pipeline needs them
-- [ ] Parity tests vs. Paddle reference detections on sample pages
+*Approach: PP-DocLayoutV3 ships only as a Paddle inference graph, so it runs through our own
+PIR graph interpreter (`Models/Paddle`) rather than a hand-written RT-DETR. Every kernel is ours
+and the result is exact by construction; the same interpreter also covers UVDoc and the
+orientation classifier.*
+
+- [x] Decide weight source: convert `inference.pdiparams` → safetensors, or read Paddle blob directly
+- [x] HGNetV2-L backbone (stem, stages, LearnableAffineBlock)
+- [x] Hybrid encoder (AIFI transformer level + CCFM/PAN fusion)
+- [x] Deformable-DETR decoder (300 queries, 6 layers, 4 sample points)
+- [x] Post-process: sigmoid scores, box decode, threshold 0.3, NMS, unclip, label map
+- [x] Reading-order / mask heads as far as the pipeline needs them
+- [x] Parity tests vs. Paddle reference detections on sample pages
 
 ## 9. Doc pre-processing (optional models)
 
@@ -100,23 +105,23 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`
 
-- [ ] Layout box filtering (`filter_overlap_boxes`) and merge modes (`union` / `large`)
-- [ ] Block cropping, adjacent-block merging (`merge_blocks`)
-- [ ] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
+- [x] Layout box filtering (`filter_overlap_boxes`) and merge modes (`union` / `large`)
+- [x] Block cropping, adjacent-block merging (`merge_blocks`)
+- [x] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
       `Chart Recognition:`, `Seal Recognition:`, `Spotting:` with per-label pixel budgets
 - [ ] Table figure tokenisation / untokenisation
 - [ ] Batched VL recognition scheduling
-- [ ] OTSL → HTML table conversion
-- [ ] Repetition truncation (`truncate_repetitive_content`)
+- [x] OTSL → HTML table conversion
+- [x] Repetition truncation (`truncate_repetitive_content`)
 - [ ] Spotting `<|LOC_n|>` post-processing
-- [ ] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
+- [x] Markdown + JSON result assembly, `markdown_ignore_labels`, multi-page concatenation
 - [ ] End-to-end parity test on a sample document
 
 ## 11. CLI — `src/PaddleOcrSharp.Cli`
 
-- [ ] `download` — fetch models
-- [ ] `parse` — document → markdown / JSON, `--layout`, `--no-layout`, `--prompt-label`
-- [ ] `bench` — throughput and allocation report
+- [x] `download` — fetch models
+- [x] `parse` — document → markdown / JSON, `--layout`, `--no-layout`, `--prompt-label`
+- [x] `bench` — throughput and allocation report
 - [ ] `dump` — emit internal tensors for parity debugging
 - [ ] Progress + structured logging
 
@@ -126,7 +131,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 - [x] `dump_vision.py` (per-layer hidden states)
 - [x] `dump_language.py` (logits, KV cache, greedy steps)
 - [x] `dump_tokenizer.py`
-- [ ] `dump_layout.py`
+- [x] `dump_layout.py`
 - [ ] `dump_end_to_end.py`
 - [ ] README describing fixture generation
 

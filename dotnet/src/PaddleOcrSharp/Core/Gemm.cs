@@ -211,6 +211,74 @@ public static class Gemm
         }
     }
 
+    /// <summary>
+    /// Four dot products of <paramref name="x"/> against consecutive rows of <paramref name="w"/>.
+    /// </summary>
+    /// <remarks>
+    /// Reading four weight rows against one activation row keeps the activation in registers
+    /// across four streams, which is what makes the convolution inner loop compute-bound rather
+    /// than load-bound.
+    /// </remarks>
+    /// <param name="x">The activation row.</param>
+    /// <param name="w">Weights, four rows of <c>x.Length</c> starting at <paramref name="offset"/>.</param>
+    /// <param name="offset">Index of the first weight row.</param>
+    /// <param name="stride">Distance between consecutive weight rows.</param>
+    /// <param name="a0">Dot product with the first row.</param>
+    /// <param name="a1">Dot product with the second row.</param>
+    /// <param name="a2">Dot product with the third row.</param>
+    /// <param name="a3">Dot product with the fourth row.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Dot4(
+        ReadOnlySpan<float> x,
+        ReadOnlySpan<float> w,
+        int offset,
+        int stride,
+        out float a0,
+        out float a1,
+        out float a2,
+        out float a3)
+    {
+        int length = x.Length;
+        int i = 0;
+        float s0 = 0f, s1 = 0f, s2 = 0f, s3 = 0f;
+
+        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        {
+            Vector256<float> v0 = Vector256<float>.Zero;
+            Vector256<float> v1 = Vector256<float>.Zero;
+            Vector256<float> v2 = Vector256<float>.Zero;
+            Vector256<float> v3 = Vector256<float>.Zero;
+
+            for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
+            {
+                Vector256<float> xv = Vector256.LoadUnsafe(in x[i]);
+                v0 = Vector256.FusedMultiplyAdd(xv, Vector256.LoadUnsafe(in w[offset + i]), v0);
+                v1 = Vector256.FusedMultiplyAdd(xv, Vector256.LoadUnsafe(in w[offset + stride + i]), v1);
+                v2 = Vector256.FusedMultiplyAdd(xv, Vector256.LoadUnsafe(in w[offset + (2 * stride) + i]), v2);
+                v3 = Vector256.FusedMultiplyAdd(xv, Vector256.LoadUnsafe(in w[offset + (3 * stride) + i]), v3);
+            }
+
+            s0 = Vector256.Sum(v0);
+            s1 = Vector256.Sum(v1);
+            s2 = Vector256.Sum(v2);
+            s3 = Vector256.Sum(v3);
+        }
+
+        for (; i < length; i++)
+        {
+            float xv = x[i];
+            s0 += xv * w[offset + i];
+            s1 += xv * w[offset + stride + i];
+            s2 += xv * w[offset + (2 * stride) + i];
+            s3 += xv * w[offset + (3 * stride) + i];
+        }
+
+        a0 = s0;
+        a1 = s1;
+        a2 = s2;
+        a3 = s3;
+    }
+
     /// <summary>Dot product of two float32 spans, accumulated in float32.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Dot(ReadOnlySpan<float> a, ReadOnlySpan<float> b)

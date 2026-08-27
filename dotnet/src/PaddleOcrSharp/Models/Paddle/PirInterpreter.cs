@@ -84,7 +84,8 @@ public sealed class PirInterpreter : IDisposable
     /// <returns>The fetched outputs, keyed by fetch name.</returns>
     public Dictionary<string, PaddleTensor> Run(
         IReadOnlyDictionary<string, PaddleTensor> inputs,
-        IPirTrace? trace = null)
+        IPirTrace? trace = null,
+        PirProfile? profile = null)
     {
         object?[] values = new object?[_valueCount];
         var outputs = new Dictionary<string, PaddleTensor>(StringComparer.Ordinal);
@@ -92,6 +93,7 @@ public sealed class PirInterpreter : IDisposable
         for (int index = 0; index < _program.Operations.Count; index++)
         {
             PirOperation operation = _program.Operations[index];
+            long started = profile is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
 
             try
             {
@@ -104,6 +106,7 @@ public sealed class PirInterpreter : IDisposable
                     exception);
             }
 
+            profile?.Add(operation.Name, System.Diagnostics.Stopwatch.GetElapsedTime(started));
             trace?.Record(index, operation, operation.Outputs.Select(id => id > 0 ? values[id] : null).ToArray());
 
             foreach (int id in operation.Inputs)
@@ -159,7 +162,7 @@ public sealed class PirInterpreter : IDisposable
                 return;
             }
 
-            case "combine":
+            case "builtin.combine":
             {
                 values[operation.Outputs[0]] = operation.Inputs
                     .Select(id => Tensor(values, id))
@@ -167,9 +170,15 @@ public sealed class PirInterpreter : IDisposable
                 return;
             }
 
-            case "split":
+            case "builtin.split":
             {
                 PaddleTensor[] list = List(values, operation.Inputs[0]);
+                if (list.Length != operation.Outputs.Length)
+                {
+                    throw new InvalidOperationException(
+                        $"builtin.split expects {operation.Outputs.Length} elements but the list holds {list.Length}.");
+                }
+
                 for (int i = 0; i < operation.Outputs.Length; i++)
                 {
                     values[operation.Outputs[i]] = list[i];
@@ -390,42 +399,42 @@ public sealed class PirInterpreter : IDisposable
                 return [LinearOps.Softmax(Tensor(values, operation.Inputs[0]), operation.Attribute("axis")!.AsInt())];
 
             case "relu":
-                return [Map(Tensor(values, operation.Inputs[0]), x => x > 0 ? x : 0)];
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.Relu)];
 
             case "sigmoid":
-                return [Map(Tensor(values, operation.Inputs[0]), x => 1.0 / (1.0 + Math.Exp(-x)))];
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.Sigmoid)];
 
             case "silu":
-                return [Map(Tensor(values, operation.Inputs[0]), x => x / (1.0 + Math.Exp(-x)))];
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.Silu)];
 
             case "gelu":
             {
                 bool approximate = operation.Attribute("approximate")?.AsBool() ?? false;
                 return
                 [
-                    Map(Tensor(values, operation.Inputs[0]), x => approximate
-                        ? 0.5 * x * (1.0 + Math.Tanh(0.7978845608028654 * (x + (0.044715 * x * x * x))))
-                        : 0.5 * x * (1.0 + Erf(x / Math.Sqrt(2.0)))),
+                    ElementwiseOps.Apply(
+                        Tensor(values, operation.Inputs[0]),
+                        approximate ? ElementwiseOps.Unary.GeluTanh : ElementwiseOps.Unary.GeluErf),
                 ];
             }
 
             case "log":
-                return [Map(Tensor(values, operation.Inputs[0]), Math.Log)];
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.Log)];
 
             case "floor":
-                return [Map(Tensor(values, operation.Inputs[0]), Math.Floor)];
+                return [ElementwiseOps.Apply(Tensor(values, operation.Inputs[0]), ElementwiseOps.Unary.Floor)];
 
             case "add":
-                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a + b)];
+                return [Binary(values, operation, ElementwiseOps.Binary.Add)];
 
             case "subtract":
-                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a - b)];
+                return [Binary(values, operation, ElementwiseOps.Binary.Subtract)];
 
             case "multiply":
-                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a * b)];
+                return [Binary(values, operation, ElementwiseOps.Binary.Multiply)];
 
             case "divide":
-                return [Broadcast.Apply(Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), static (a, b) => a / b)];
+                return [Binary(values, operation, ElementwiseOps.Binary.Divide)];
 
             case "remainder":
                 return
@@ -458,10 +467,7 @@ public sealed class PirInterpreter : IDisposable
                 double bias = operation.Attribute("bias")?.AsDouble() ?? 0.0;
                 bool biasAfterScale = operation.Attribute("bias_after_scale")?.AsBool() ?? true;
 
-                return
-                [
-                    Map(input, x => biasAfterScale ? (x * factor) + bias : (x + bias) * factor),
-                ];
+                return [ElementwiseOps.Scale(input, factor, bias, biasAfterScale)];
             }
 
             case "clip":
@@ -469,7 +475,7 @@ public sealed class PirInterpreter : IDisposable
                 PaddleTensor input = Tensor(values, operation.Inputs[0]);
                 double low = Tensor(values, operation.Inputs[1]).GetDouble(0);
                 double high = Tensor(values, operation.Inputs[2]).GetDouble(0);
-                return [Map(input, x => Math.Clamp(x, low, high))];
+                return [ElementwiseOps.Clip(input, low, high)];
             }
 
             case "where":
@@ -698,16 +704,9 @@ public sealed class PirInterpreter : IDisposable
         }
     }
 
-    private static double Erf(double x)
-    {
-        // Abramowitz & Stegun 7.1.26; the graph only uses erf inside GELU.
-        double sign = x < 0 ? -1 : 1;
-        x = Math.Abs(x);
-        double t = 1.0 / (1.0 + (0.3275911 * x));
-        double y = 1.0 - ((((((((1.061405429 * t) - 1.453152027) * t) + 1.421413741) * t) - 0.284496736) * t)
-            + 0.254829592) * t * Math.Exp(-x * x);
-        return sign * y;
-    }
+    private static PaddleTensor Binary(object?[] values, PirOperation operation, ElementwiseOps.Binary kind) =>
+        ElementwiseOps.Apply(
+            Tensor(values, operation.Inputs[0]), Tensor(values, operation.Inputs[1]), kind);
 
     private static (int Height, int Width) ResolveInterpolationSize(
         PirOperation operation,
@@ -855,6 +854,45 @@ public sealed class PirInterpreter : IDisposable
     {
         _constants.Clear();
         _parameters.Dispose();
+    }
+}
+
+/// <summary>
+/// Accumulates per-operator wall-clock time, for finding the expensive part of a graph.
+/// </summary>
+public sealed class PirProfile
+{
+    private readonly Dictionary<string, (TimeSpan Elapsed, int Count)> _entries = new(StringComparer.Ordinal);
+
+    /// <summary>Records one operator's execution.</summary>
+    public void Add(string name, TimeSpan elapsed)
+    {
+        _entries.TryGetValue(name, out (TimeSpan Elapsed, int Count) entry);
+        _entries[name] = (entry.Elapsed + elapsed, entry.Count + 1);
+    }
+
+    /// <summary>Per-operator totals, slowest first.</summary>
+    public IEnumerable<(string Name, TimeSpan Elapsed, int Count)> ByCost() => _entries
+        .Select(entry => (entry.Key, entry.Value.Elapsed, entry.Value.Count))
+        .OrderByDescending(entry => entry.Elapsed);
+
+    /// <summary>Total time across every operator.</summary>
+    public TimeSpan Total => _entries.Values.Aggregate(TimeSpan.Zero, (sum, entry) => sum + entry.Elapsed);
+
+    /// <summary>A human-readable table of the costliest operators.</summary>
+    public string Report(int top = 15)
+    {
+        var builder = new System.Text.StringBuilder();
+        TimeSpan total = Total;
+        builder.AppendLine($"{"operator",-24}{"total",10}{"calls",8}{"share",8}");
+        foreach ((string name, TimeSpan elapsed, int count) in ByCost().Take(top))
+        {
+            double share = total > TimeSpan.Zero ? elapsed / total : 0;
+            builder.AppendLine($"{name,-24}{elapsed.TotalMilliseconds,9:F0}ms{count,8}{share,7:P1}");
+        }
+
+        builder.AppendLine($"{"total",-24}{total.TotalMilliseconds,9:F0}ms");
+        return builder.ToString();
     }
 }
 

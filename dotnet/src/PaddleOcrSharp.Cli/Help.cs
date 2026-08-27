@@ -12,6 +12,7 @@ public static class Help
 
             Usage:
               paddleocr-sharp download [model ...]        Fetch models into the local cache
+              paddleocr-sharp parse <image ...>           Parse pages to markdown / JSON
               paddleocr-sharp recognize <image>           Recognise one already-cropped block
               paddleocr-sharp bench                       Measure throughput of the model stages
 
@@ -19,6 +20,17 @@ public static class Help
               --model-dir <path>      Use a checkpoint directory instead of the cache
               --cache <path>          Override the cache root (default: ~/.cache/paddleocr-sharp)
               --endpoint <url>        Hugging Face-compatible endpoint (default: HF_ENDPOINT)
+
+            parse options:
+              --layout-dir <path>     Use a PP-DocLayoutV3 directory instead of the cache
+              --no-layout             Send the whole page to the VL model
+              --layout-threshold <f>  Detection score threshold (default: 0.3)
+              --chart                 Recognise charts instead of keeping them as images
+              --seal                  Recognise seals instead of keeping them as images
+              --ocr-images            Run OCR over image blocks too
+              --output-dir <path>     Write <name>.md, <name>.json and imgs/ per page
+              --format markdown|json  Output format when writing to stdout
+              --block-concurrency <n> Blocks recognised in parallel (default: 1)
 
             recognize options:
               --prompt-label <name>   ocr | table | formula | chart | seal | spotting  (default: ocr)
