@@ -147,9 +147,9 @@ public sealed class DocumentParser : IDisposable
             string?[] figurePaths = new string?[regions.Count];
             for (int i = 0; i < regions.Count; i++)
             {
-                if (IsImageBlock(regions[i].Label, settings))
+                if (KeptAsPicture(regions[i].Label, settings))
                 {
-                    figurePaths[i] = FigurePath(regions[i], i);
+                    figurePaths[i] = FigurePath(regions[i]);
                 }
             }
 
@@ -159,6 +159,7 @@ public sealed class DocumentParser : IDisposable
                 : [.. Enumerable.Range(0, regions.Count).Select(i => new BlockGroup([i], []))];
 
             var blocks = new ParsedBlock[regions.Count];
+            var tokenizedByBlock = new IReadOnlyList<TokenizedFigure>?[regions.Count];
             var absorbed = new HashSet<int>();
             int completed = 0;
 
@@ -198,11 +199,9 @@ public sealed class DocumentParser : IDisposable
 
                 if (tokenized.Count > 0)
                 {
-                    blocks[primary] = blocks[primary] with
-                    {
-                        Content = TableFigureTokenizer.Untokenize(
-                            blocks[primary].Content, tokenized, settings.Markdown.ImageDirectory),
-                    };
+                    // Substituting the placeholders has to wait until every block is recognised,
+                    // because a figure's own text goes in beside its image.
+                    tokenizedByBlock[primary] = tokenized;
 
                     lock (absorbed)
                     {
@@ -246,6 +245,21 @@ public sealed class DocumentParser : IDisposable
                 }
             }
 
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                if (tokenizedByBlock[i] is { Count: > 0 } tokenized)
+                {
+                    blocks[i] = blocks[i] with
+                    {
+                        Content = TableFigureTokenizer.Untokenize(
+                            blocks[i].Content,
+                            tokenized,
+                            settings.Markdown.ImageDirectory,
+                            region => blocks[region]?.Content ?? string.Empty),
+                    };
+                }
+            }
+
             // Figures that a table absorbed are described inside its HTML, so they no longer
             // belong to the page as separate blocks.
             IReadOnlyList<ParsedBlock> retained = absorbed.Count == 0
@@ -267,9 +281,16 @@ public sealed class DocumentParser : IDisposable
     /// Labels that are never merged with a neighbour: figures, tables, and whichever of charts and
     /// seals are being kept as images rather than recognised.
     /// </summary>
-    private static string[] NonMergeLabels(DocumentParserOptions options)
+    private static string[] NonMergeLabels(DocumentParserOptions options) =>
+        [.. SkippedByModel(options), "table"];
+
+    /// <summary>
+    /// Labels whose blocks are not sent to the model at all, because they are kept as pictures.
+    /// </summary>
+    /// <remarks><c>image_labels</c>.</remarks>
+    private static List<string> SkippedByModel(DocumentParserOptions options)
     {
-        var labels = new List<string>(BlockLabels.ImageLabels) { "table" };
+        var labels = options.UseOcrForImageBlocks ? [] : new List<string>(BlockLabels.ImageLabels);
 
         if (!options.UseChartRecognition)
         {
@@ -281,8 +302,22 @@ public sealed class DocumentParser : IDisposable
             labels.Add("seal");
         }
 
-        return [.. labels];
+        return labels;
     }
+
+    /// <summary>
+    /// Labels whose blocks get their crop attached as a picture.
+    /// </summary>
+    /// <remarks>
+    /// <c>vis_image_labels</c>, and deliberately not the same set as
+    /// <see cref="SkippedByModel"/>: the two decisions are independent upstream. A seal is always
+    /// kept as a picture even when it is also recognised, and asking for OCR on figures gives a
+    /// figure both a picture and recognised text rather than swapping one for the other.
+    /// </remarks>
+    private static bool KeptAsPicture(string label, DocumentParserOptions options) =>
+        BlockLabels.ImageLabels.Contains(label)
+        || label == "seal"
+        || (label == "chart" && !options.UseChartRecognition);
 
     private ParsedBlock Recognize(
         RgbImage crop,
@@ -291,12 +326,21 @@ public sealed class DocumentParser : IDisposable
         DocumentParserOptions options,
         CancellationToken cancellationToken)
     {
-        if (IsImageBlock(region.Label, options))
+        byte[]? picture = null;
+        string? picturePath = null;
+
+        if (KeptAsPicture(region.Label, options))
+        {
+            picture = ImageIO.EncodeJpeg(crop);
+            picturePath = FigurePath(region);
+        }
+
+        if (SkippedByModel(options).Contains(region.Label))
         {
             return new ParsedBlock(region.Label, region, string.Empty, region.ReadingOrder)
             {
-                Image = ImageIO.EncodePng(crop),
-                ImagePath = FigurePath(region, index),
+                Image = picture,
+                ImagePath = picturePath,
             };
         }
 
@@ -342,6 +386,8 @@ public sealed class DocumentParser : IDisposable
         return new ParsedBlock(region.Label, region, content, region.ReadingOrder)
         {
             SpottedText = spotted,
+            Image = picture,
+            ImagePath = picturePath,
         };
     }
 
@@ -395,25 +441,16 @@ public sealed class DocumentParser : IDisposable
         }
     }
 
-    /// <summary>File name a figure block is written to.</summary>
-    private static string FigurePath(LayoutBox region, int index) =>
-        $"{region.Label}_{index}_{(int)region.Left}_{(int)region.Top}.png";
-
-    private static bool IsImageBlock(string label, DocumentParserOptions options)
-    {
-        if (options.UseOcrForImageBlocks)
-        {
-            return false;
-        }
-
-        if (BlockLabels.ImageLabels.Contains(label))
-        {
-            return true;
-        }
-
-        return (label == "chart" && !options.UseChartRecognition)
-            || (label == "seal" && !options.UseSealRecognition);
-    }
+    /// <summary>
+    /// File name a figure block is written to, as <c>construct_img_path</c>.
+    /// </summary>
+    /// <remarks>
+    /// The box makes the name unique within a page, which is what lets a table's
+    /// <c>[Fn]</c> placeholder be resolved back to the figure it covered. JPEG, because that is
+    /// the extension upstream writes and the format its saver then infers from it.
+    /// </remarks>
+    private static string FigurePath(LayoutBox region) =>
+        $"img_in_{region.Label}_box_{(int)region.Left}_{(int)region.Top}_{(int)region.Right}_{(int)region.Bottom}.jpg";
 
     /// <summary>
     /// Rewrites LaTeX delimiters the model emits into the <c>$</c> forms markdown renders.

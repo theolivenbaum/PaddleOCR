@@ -66,6 +66,16 @@ public static class ImageIO
         return data.ToArray();
     }
 
+    /// <summary>Encodes an image as JPEG bytes, which is the format figure crops are written in.</summary>
+    /// <param name="image">The image to encode.</param>
+    /// <param name="quality">JPEG quality; 75 is what Pillow writes by default, and so upstream.</param>
+    public static byte[] EncodeJpeg(RgbImage image, int quality = 75)
+    {
+        using SKBitmap bitmap = ToBitmap(image);
+        using SKData data = bitmap.Encode(SKEncodedImageFormat.Jpeg, quality);
+        return data.ToArray();
+    }
+
     private static RgbImage FromBitmap(SKBitmap bitmap)
     {
         RgbImage image = RgbImage.Rent(bitmap.Width, bitmap.Height);

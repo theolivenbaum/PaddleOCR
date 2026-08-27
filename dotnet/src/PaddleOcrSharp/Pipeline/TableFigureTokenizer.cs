@@ -116,20 +116,35 @@ public static partial class TableFigureTokenizer
     public static string Untokenize(
         string html,
         IReadOnlyList<TokenizedFigure> figures,
-        string imageDirectory)
+        string imageDirectory,
+        Func<int, string>? textOf = null)
     {
         if (figures.Count == 0)
         {
             return html;
         }
 
-        Dictionary<string, string> byToken = figures.ToDictionary(
-            figure => figure.Token, figure => figure.Path, StringComparer.Ordinal);
+        Dictionary<string, TokenizedFigure> byToken = figures.ToDictionary(
+            figure => figure.Token, figure => figure, StringComparer.Ordinal);
 
         return TokenPattern().Replace(html, match =>
-            byToken.TryGetValue(match.Value, out string? path)
-                ? $"<img src=\"{imageDirectory}/{path}\" alt=\"Image\" />"
-                : match.Value);
+        {
+            if (!byToken.TryGetValue(match.Value, out TokenizedFigure figure))
+            {
+                return match.Value;
+            }
+
+            string path = $"{imageDirectory}/{figure.Path}"
+                .Replace("-\n", string.Empty, StringComparison.Ordinal)
+                .Replace("\n", " ", StringComparison.Ordinal);
+
+            // The doubled quote after `Image` is upstream's, and it is what ends up in the HTML
+            // a consumer reads, so it is reproduced rather than tidied.
+            string tag = $"<img src=\"{path}\" alt=\"Image\"\" />";
+
+            string text = textOf?.Invoke(figure.RegionIndex) ?? string.Empty;
+            return text.Length > 0 ? $"{tag}\n\n{text}\n\n" : tag;
+        });
     }
 
     /// <summary>

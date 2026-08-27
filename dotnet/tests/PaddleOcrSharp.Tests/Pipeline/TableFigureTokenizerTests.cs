@@ -107,13 +107,29 @@ public class TableFigureTokenizerTests
     [Fact]
     public void PlaceholdersBecomeImageReferences()
     {
-        IReadOnlyList<TokenizedFigure> figures = [new TokenizedFigure("[F23]", 4, "image_4_10_20.png")];
+        IReadOnlyList<TokenizedFigure> figures =
+            [new TokenizedFigure("[F23]", 4, "img_in_image_box_10_20_60_80.jpg")];
 
         string html = TableFigureTokenizer.Untokenize(
             "<table><tr><td>[F23]</td><td>x</td></tr></table>", figures, "imgs");
 
-        Assert.Contains("<img src=\"imgs/image_4_10_20.png\" alt=\"Image\" />", html);
+        // The doubled quote after `Image` is upstream's own, and the port keeps it so the emitted
+        // HTML matches what a consumer would get from PaddleX.
+        Assert.Contains(
+            "<img src=\"imgs/img_in_image_box_10_20_60_80.jpg\" alt=\"Image\"\" />", html);
         Assert.DoesNotContain("[F23]", html);
+    }
+
+    [Fact]
+    public void AFiguresOwnTextFollowsItsImage()
+    {
+        IReadOnlyList<TokenizedFigure> figures =
+            [new TokenizedFigure("[F23]", 4, "img_in_image_box_10_20_60_80.jpg")];
+
+        string html = TableFigureTokenizer.Untokenize(
+            "<td>[F23]</td>", figures, "imgs", _ => "A caption");
+
+        Assert.EndsWith("\" />\n\nA caption\n\n</td>", html);
     }
 
     [Fact]
