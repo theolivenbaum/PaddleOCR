@@ -17,20 +17,20 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 1. Core tensor infrastructure — `src/PaddleOcrSharp/Core`
 
-- [ ] `Tensor` / `TensorView` over pooled `Memory<float>` with shape + stride
-- [ ] `TensorPool` — `ArrayPool`-backed rent/return, scoped lifetimes, zero steady-state alloc
-- [ ] dtype conversion: `bfloat16`/`float16` ↔ `float32` (vectorised, `Vector512` path)
-- [ ] SIMD element-wise kernels: add, mul, silu, gelu(erf), gelu(tanh), softmax (fp32 accum), rsqrt
-- [ ] `RmsNorm`, `LayerNorm` (fp32 accumulation, matching upstream precision)
-- [ ] GEMM: blocked, multi-threaded, bf16-weight × fp32-activation with on-the-fly tile conversion
+- [x] `Tensor` / `TensorView` over pooled `Memory<float>` with shape + stride
+- [x] `TensorPool` — `ArrayPool`-backed rent/return, scoped lifetimes, zero steady-state alloc
+- [x] dtype conversion: `bfloat16`/`float16` ↔ `float32` (vectorised, `Vector512` path)
+- [x] SIMD element-wise kernels: add, mul, silu, gelu(erf), gelu(tanh), softmax (fp32 accum), rsqrt
+- [x] `RmsNorm`, `LayerNorm` (fp32 accumulation, matching upstream precision)
+- [x] GEMM: blocked, multi-threaded, bf16-weight × fp32-activation with on-the-fly tile conversion
 - [ ] Attention primitive: scaled dot-product with causal / block-diagonal masks, fp32 softmax
-- [ ] Unit tests for every kernel against a naive scalar reference
+- [x] Unit tests for every kernel against a naive scalar reference
 
 ## 2. Weight formats — `src/PaddleOcrSharp/Formats`
 
-- [ ] `SafetensorsFile`: header parse, memory-mapped tensor views, lazy dtype-aware access
+- [x] `SafetensorsFile`: header parse, memory-mapped tensor views, lazy dtype-aware access
 - [ ] Paddle `inference.pdiparams` + `inference.json` reader (for `PP-DocLayoutV3`)
-- [ ] `.npz` reader/writer (test fixtures only)
+- [x] `.npz` reader/writer (test fixtures only)
 - [ ] Weight-name mapping tables (HF ⇄ internal module tree)
 
 ## 3. Model downloader — `src/PaddleOcrSharp/Download`
@@ -44,14 +44,14 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 4. Imaging — `src/PaddleOcrSharp/Imaging`
 
-- [ ] SkiaSharp decode (PNG/JPEG/BMP/WEBP) → RGB planar, EXIF orientation
+- [x] SkiaSharp decode (PNG/JPEG/BMP/WEBP) → RGB planar, EXIF orientation
 - [ ] PDF page rasterisation (deferred — CLI accepts images first)
-- [ ] `SmartResize` port (`factor`, `min_pixels`, `max_pixels`, aspect-ratio guard)
-- [ ] Bicubic resample matching PIL/`torchvision` (a = −0.5, antialias behaviour verified)
-- [ ] Rescale + normalize + HWC→CHW, fused and vectorised
-- [ ] Patchify to `(grid_h*grid_w, 3, 14, 14)` and grid-THW computation
+- [x] `SmartResize` port (`factor`, `min_pixels`, `max_pixels`, aspect-ratio guard)
+- [x] Bicubic resample matching PIL/`torchvision` (a = −0.5, antialias behaviour verified)
+- [x] Rescale + normalize + HWC→CHW, fused and vectorised
+- [x] Patchify to `(grid_h*grid_w, 3, 14, 14)` and grid-THW computation
 - [ ] `crop_margin`, seal/spotting pre-processing helpers
-- [ ] Parity tests vs. Python `image_processing_paddleocr_vl.PaddleOCRVLImageProcessor`
+- [x] Parity tests vs. Python `image_processing_paddleocr_vl.PaddleOCRVLImageProcessor`
 
 ## 5. Vision tower — `src/PaddleOcrSharp/Models/Vision`
 
@@ -122,7 +122,7 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 12. Reference tooling — `dotnet/tools/reference`
 
-- [ ] `dump_image_processing.py`
+- [x] `dump_image_processing.py`
 - [ ] `dump_vision.py` (per-layer hidden states)
 - [ ] `dump_language.py` (logits, KV cache, greedy steps)
 - [ ] `dump_tokenizer.py`
