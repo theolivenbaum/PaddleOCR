@@ -36,6 +36,7 @@ public static class Help
               --password <text>       Password for an encrypted PDF
               --output-dir <path>     Write <name>.md, <name>.json and imgs/ per page
               --format markdown|json  Output format when writing to stdout
+              --page-separator <text> Text between pages (default: a blank line)
               --block-concurrency <n> Blocks recognised in parallel (default: 1)
 
             recognize options:

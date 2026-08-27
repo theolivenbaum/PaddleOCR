@@ -132,9 +132,10 @@ public static class ParseCommand
         if (outputDirectory is null)
         {
             string format = command.Get("format", "markdown")!;
+            var document = new ParsedDocument(pages);
             Console.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
                 ? ToJson(pages)
-                : string.Join("\n\n---\n\n", pages.Select(page => page.ToMarkdown(options.Markdown))));
+                : document.ToMarkdown(options.Markdown, command.Get("page-separator", "\n\n")!));
         }
 
         return 0;

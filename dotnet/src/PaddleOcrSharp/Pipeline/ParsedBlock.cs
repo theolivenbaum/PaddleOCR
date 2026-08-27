@@ -33,3 +33,18 @@ public sealed record ParsedPage(int Index, int Width, int Height, IReadOnlyList<
     public string ToMarkdown(MarkdownOptions? options = null) =>
         MarkdownWriter.Write(Blocks, options ?? MarkdownOptions.Default);
 }
+
+/// <summary>A parsed document: one or more pages.</summary>
+/// <param name="Pages">The pages, in order.</param>
+public sealed record ParsedDocument(IReadOnlyList<ParsedPage> Pages)
+{
+    /// <summary>
+    /// Renders the whole document as markdown.
+    /// </summary>
+    /// <remarks>
+    /// Pages are joined by a blank line, as <c>concatenate_markdown_pages</c> does. Pass a
+    /// <paramref name="separator"/> to put a rule or heading between them instead.
+    /// </remarks>
+    public string ToMarkdown(MarkdownOptions? options = null, string separator = "\n\n") =>
+        string.Join(separator, Pages.Select(page => page.ToMarkdown(options)));
+}

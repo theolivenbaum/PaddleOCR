@@ -127,11 +127,22 @@ public static class Gemm
         int colStart,
         int colCount)
     {
+        int colEnd = colStart + colCount;
+
+        // Widening only pays when the panel is reused. Decoding a single token reads every weight
+        // exactly once, so there the fused path that widens inside the dot product is strictly
+        // cheaper — and the output projection is a 103424-row matrix, where the difference is the
+        // whole step.
+        if (rows < RowBlock)
+        {
+            RunNarrow(x, rows, inner, weight, bias, y, cols, colStart, colCount);
+            return;
+        }
+
         using PooledBuffer panel = TensorPool.Rent(colCount * inner);
         Span<float> w = panel.Span;
         weight.CopyRows(colStart, colCount, w);
 
-        int colEnd = colStart + colCount;
         Span<float> tile = stackalloc float[16];
 
         int m = 0;
@@ -174,19 +185,52 @@ public static class Gemm
             }
         }
 
-        for (; m < rows; m++)
+        if (m < rows)
+        {
+            RunNarrow(x[(m * inner)..], rows - m, inner, weight, bias, y[(m * cols)..], cols, colStart, colCount);
+        }
+    }
+
+    /// <summary>
+    /// Computes one column panel for fewer rows than the register block, reading the weights in
+    /// their stored dtype.
+    /// </summary>
+    private static void RunNarrow(
+        ReadOnlySpan<float> x,
+        int rows,
+        int inner,
+        WeightMatrix weight,
+        ReadOnlySpan<float> bias,
+        Span<float> y,
+        int cols,
+        int colStart,
+        int colCount)
+    {
+        int colEnd = colStart + colCount;
+
+        for (int m = 0; m < rows; m++)
         {
             ReadOnlySpan<float> xr = x.Slice(m * inner, inner);
-            Span<float> yr = y.Slice((m * cols) + colStart, colCount);
+            Span<float> yr = y.Slice(m * cols, cols);
 
-            for (int local = 0; local < colCount; local++)
+            int n = colStart;
+            for (; n <= colEnd - ColBlock; n += ColBlock)
             {
-                yr[local] = Dot(xr, w.Slice(local * inner, inner));
+                weight.Dot4(xr, n, out float a0, out float a1, out float a2, out float a3);
+                yr[n] = a0;
+                yr[n + 1] = a1;
+                yr[n + 2] = a2;
+                yr[n + 3] = a3;
+            }
+
+            for (; n < colEnd; n++)
+            {
+                yr[n] = weight.Dot(xr, n);
             }
 
             if (!bias.IsEmpty)
             {
-                Kernels.AddInPlace(yr, bias[colStart..colEnd]);
+                Kernels.AddInPlace(yr[colStart..colEnd], bias[colStart..colEnd]);
             }
         }
     }

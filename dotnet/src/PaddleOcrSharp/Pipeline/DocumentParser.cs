@@ -114,62 +114,121 @@ public sealed class DocumentParser : IDisposable
         CancellationToken cancellationToken)
     {
         IReadOnlyList<LayoutBox> regions = settings.UseLayoutDetection && _layout is not null
-            ? _layout.Detect(page, settings.Layout)
+            ? OverlapFilter.Apply(_layout.Detect(page, settings.Layout))
             : [WholePage(page, settings.WholePageLabel)];
 
-        if (settings.MergeLayoutBlocks && regions.Count > 1)
-        {
-            regions = MergeAdjacent(regions);
-        }
+        var crops = new RgbImage[regions.Count];
+        var sizes = new (int Width, int Height)[regions.Count];
 
-        var blocks = new ParsedBlock[regions.Count];
-
-        void RecognizeAt(int index)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            LayoutBox region = regions[index].ClampTo(page.Width, page.Height);
-            blocks[index] = Recognize(page, region, index, settings, cancellationToken);
-            progress?.Report(new BlockProgress(index, regions.Count, region.Label));
-        }
-
-        if (settings.BlockConcurrency > 1)
-        {
-            Parallel.For(
-                0,
-                regions.Count,
-                new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = settings.BlockConcurrency,
-                    CancellationToken = cancellationToken,
-                },
-                RecognizeAt);
-        }
-        else
-        {
-            for (int index = 0; index < regions.Count; index++)
+            for (int i = 0; i < regions.Count; i++)
             {
-                RecognizeAt(index);
+                LayoutBox region = regions[i].ClampTo(page.Width, page.Height);
+                crops[i] = page.Crop(
+                    (int)MathF.Floor(region.Left),
+                    (int)MathF.Floor(region.Top),
+                    (int)MathF.Ceiling(region.Right),
+                    (int)MathF.Ceiling(region.Bottom));
+                sizes[i] = (crops[i].Width, crops[i].Height);
+            }
+
+            IReadOnlyCollection<string> nonMergeLabels = NonMergeLabels(settings);
+            List<BlockGroup> groups = settings.MergeLayoutBlocks && regions.Count > 1
+                ? BlockMerger.Group(regions, sizes, nonMergeLabels)
+                : [.. Enumerable.Range(0, regions.Count).Select(i => new BlockGroup([i], []))];
+
+            var blocks = new ParsedBlock[regions.Count];
+            int completed = 0;
+
+            void RecognizeGroup(int groupIndex)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                BlockGroup group = groups[groupIndex];
+                int primary = group.Indices[0];
+                LayoutBox region = regions[primary].ClampTo(page.Width, page.Height);
+
+                using RgbImage merged = group.Indices.Count == 1
+                    ? crops[primary].Clone()
+                    : ImageStacker.Stack(
+                        [.. group.Indices.Select(index => crops[index])], group.Alignments);
+
+                blocks[primary] = Recognize(merged, region, primary, settings, cancellationToken);
+
+                // Every region of a merged group keeps its box so the JSON still describes the
+                // page, but only the first carries the recognised text.
+                for (int i = 1; i < group.Indices.Count; i++)
+                {
+                    int index = group.Indices[i];
+                    LayoutBox other = regions[index].ClampTo(page.Width, page.Height);
+                    blocks[index] = new ParsedBlock(other.Label, other, string.Empty, other.ReadingOrder);
+                }
+
+                progress?.Report(new BlockProgress(
+                    Interlocked.Increment(ref completed) - 1, groups.Count, region.Label));
+            }
+
+            if (settings.BlockConcurrency > 1)
+            {
+                Parallel.For(
+                    0,
+                    groups.Count,
+                    new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = settings.BlockConcurrency,
+                        CancellationToken = cancellationToken,
+                    },
+                    RecognizeGroup);
+            }
+            else
+            {
+                for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+                {
+                    RecognizeGroup(groupIndex);
+                }
+            }
+
+            return new ParsedPage(pageIndex, page.Width, page.Height, blocks);
+        }
+        finally
+        {
+            foreach (RgbImage? crop in crops)
+            {
+                crop?.Dispose();
             }
         }
+    }
 
-        return new ParsedPage(pageIndex, page.Width, page.Height, blocks);
+    /// <summary>
+    /// Labels that are never merged with a neighbour: figures, tables, and whichever of charts and
+    /// seals are being kept as images rather than recognised.
+    /// </summary>
+    private static string[] NonMergeLabels(DocumentParserOptions options)
+    {
+        var labels = new List<string>(BlockLabels.ImageLabels) { "table" };
+
+        if (!options.UseChartRecognition)
+        {
+            labels.Add("chart");
+        }
+
+        if (!options.UseSealRecognition)
+        {
+            labels.Add("seal");
+        }
+
+        return [.. labels];
     }
 
     private ParsedBlock Recognize(
-        RgbImage page,
+        RgbImage crop,
         LayoutBox region,
         int index,
         DocumentParserOptions options,
         CancellationToken cancellationToken)
     {
-        bool keepAsImage = IsImageBlock(region.Label, options);
-        using RgbImage crop = page.Crop(
-            (int)MathF.Floor(region.Left),
-            (int)MathF.Floor(region.Top),
-            (int)MathF.Ceiling(region.Right),
-            (int)MathF.Ceiling(region.Bottom));
-
-        if (keepAsImage)
+        if (IsImageBlock(region.Label, options))
         {
             return new ParsedBlock(region.Label, region, string.Empty, region.ReadingOrder)
             {
@@ -330,50 +389,6 @@ public sealed class DocumentParser : IDisposable
         }
 
         return image.Crop(left, top, right + 1, bottom + 1);
-    }
-
-    /// <summary>
-    /// Merges vertically adjacent regions that share a label, so a paragraph split across two
-    /// detections is recognised as one block.
-    /// </summary>
-    private static IReadOnlyList<LayoutBox> MergeAdjacent(IReadOnlyList<LayoutBox> regions)
-    {
-        string[] neverMerge = [.. BlockLabels.ImageLabels, "table", "chart", "seal"];
-
-        var merged = new List<LayoutBox>(regions.Count);
-        foreach (LayoutBox region in regions)
-        {
-            if (merged.Count == 0 || neverMerge.Contains(region.Label))
-            {
-                merged.Add(region);
-                continue;
-            }
-
-            LayoutBox previous = merged[^1];
-            bool sameLabel = previous.Label == region.Label && !neverMerge.Contains(previous.Label);
-            bool horizontallyAligned =
-                Math.Abs(previous.Left - region.Left) < 0.1f * Math.Max(previous.Width, region.Width) &&
-                Math.Abs(previous.Right - region.Right) < 0.1f * Math.Max(previous.Width, region.Width);
-            bool verticallyAdjacent = region.Top - previous.Bottom is >= -2f and < 20f;
-
-            if (sameLabel && horizontallyAligned && verticallyAdjacent)
-            {
-                merged[^1] = previous with
-                {
-                    Left = Math.Min(previous.Left, region.Left),
-                    Top = Math.Min(previous.Top, region.Top),
-                    Right = Math.Max(previous.Right, region.Right),
-                    Bottom = Math.Max(previous.Bottom, region.Bottom),
-                    Score = Math.Max(previous.Score, region.Score),
-                };
-            }
-            else
-            {
-                merged.Add(region);
-            }
-        }
-
-        return merged;
     }
 
     private static LayoutBox WholePage(RgbImage page, string label) =>

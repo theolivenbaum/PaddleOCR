@@ -109,8 +109,8 @@ orientation classifier.*
 - [x] Block cropping, adjacent-block merging (`merge_blocks`)
 - [x] Per-label prompts: `OCR:`, `Table Recognition:`, `Formula Recognition:`,
       `Chart Recognition:`, `Seal Recognition:`, `Spotting:` with per-label pixel budgets
-- [ ] Table figure tokenisation / untokenisation
-- [ ] Batched VL recognition scheduling
+- [ ] Table figure tokenisation / untokenisation (`tokenize_figure_of_table`) — figures embedded inside a table cell
+- [~] Batched VL recognition scheduling (blocks run sequentially or across `BlockConcurrency` threads; upstream batches by pixel budget)
 - [x] OTSL → HTML table conversion
 - [x] Repetition truncation (`truncate_repetitive_content`)
 - [x] Spotting `<|LOC_n|>` post-processing
@@ -141,4 +141,4 @@ orientation classifier.*
 - [~] Allocation audit (decode is ~10 MiB/step; graph tensors now skip zero-initialisation)
 - [x] Benchmarks vs. Python reference (tokens/s, pages/min)
 - [ ] AOT-compatibility check for the CLI
-- [ ] Public API review + XML docs
+- [~] Public API review + XML docs (every public member documented; a shape review is still open)
