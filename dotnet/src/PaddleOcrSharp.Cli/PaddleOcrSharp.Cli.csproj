@@ -4,7 +4,20 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>PaddleOcrSharp.Cli</RootNamespace>
     <AssemblyName>paddleocr-sharp</AssemblyName>
-    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Shipped to NuGet as a .NET tool: `dotnet tool install -g PaddleOCR.Cli` puts
+       `paddleocr-sharp` on the PATH. PackAsTool publishes the project into the package, so the
+       native assets SkiaSharp and PDFium bring along travel with it. -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>paddleocr-sharp</ToolCommandName>
+    <PackageId>PaddleOCR.Cli</PackageId>
+    <Title>PaddleOCR for .NET — command-line tool</Title>
+    <Description>`paddleocr-sharp`, the command-line front-end to the PaddleOCR .NET library: parse pages of a PDF or an image to markdown and JSON, recognise a single cropped block, fetch the models, and benchmark the stages. Pure C#, no ONNX Runtime and no Paddle Inference.</Description>
+    <!-- A tool runs on whatever runtime the machine has, which will not be exactly 10.0.x. -->
+    <RollForward>Major</RollForward>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,5 +28,29 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
   </ItemGroup>
+
+  <!-- SkiaSharp and PDFium between them ship natives for two dozen runtime identifiers, and a
+       RID-agnostic publish takes all of them: 549 MiB, of which 255 MiB is Windows debug symbols
+       for libSkiaSharp. Since that publish output *is* the tool package, trim it to the platforms
+       a .NET tool actually gets installed on, and drop the native symbols. A RID-specific publish
+       (`-r linux-x64`, the native-AOT path) resolves one RID and is left alone. -->
+  <PropertyGroup>
+    <ToolRuntimeIdentifiers>;win-x64;win-arm64;linux-x64;linux-arm64;linux-musl-x64;linux-musl-arm64;osx;osx-x64;osx-arm64;</ToolRuntimeIdentifiers>
+  </PropertyGroup>
+
+  <Target Name="TrimToolRuntimeAssets"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          Condition="'$(RuntimeIdentifier)' == ''">
+    <ItemGroup>
+      <ResolvedFileToPublish
+        Remove="@(ResolvedFileToPublish)"
+        Condition="'%(ResolvedFileToPublish.AssetType)' == 'native' and '%(Extension)' == '.pdb'" />
+      <ResolvedFileToPublish
+        Remove="@(ResolvedFileToPublish)"
+        Condition="'%(ResolvedFileToPublish.AssetType)' == 'native'
+                   and '%(ResolvedFileToPublish.RuntimeIdentifier)' != ''
+                   and !$(ToolRuntimeIdentifiers.Contains(';%(ResolvedFileToPublish.RuntimeIdentifier);'))" />
+    </ItemGroup>
+  </Target>
 
 </Project>

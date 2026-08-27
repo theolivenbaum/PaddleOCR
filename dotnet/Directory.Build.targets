@@ -1,0 +1,10 @@
+<Project>
+
+  <!-- Imported after the project file, so IsPackable is already set: only the projects that
+       ship carry the repository README, and EnableDefaultNoneItems=false means it has to be
+       listed explicitly. -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

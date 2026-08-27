@@ -10,12 +10,27 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
-    <Version>0.1.0</Version>
-    <Authors>PaddleOCR contributors</Authors>
-    <Product>PaddleOcrSharp</Product>
-    <Description>Pure C# port of the PaddleOCR-VL-1.6 document parsing pipeline.</Description>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);SYSLIB1045</NoWarn>
+  </PropertyGroup>
+
+  <!-- Package metadata shared by every project that ships to NuGet. The build pipeline
+       (../.devops/build-nuget.yml) overrides Version with a CalVer stamp; 0.1.0 is what a
+       local `dotnet pack` produces. -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Company>Curiosity GmbH</Company>
+    <Authors>Curiosity GmbH and the PaddleOCR authors</Authors>
+    <Product>PaddleOcrSharp</Product>
+    <Description>Pure C# port of the PaddleOCR-VL-1.6 document parsing pipeline. No ONNX Runtime, no Paddle Inference, no libtorch.</Description>
+    <Copyright>Copyright (c) 2026 Curiosity GmbH; Copyright (c) PaddlePaddle Authors</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageProjectUrl>https://github.com/theolivenbaum/PaddleOCR</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/theolivenbaum/PaddleOCR</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>ocr;paddleocr;paddleocr-vl;document-parsing;vlm;layout-detection;markdown;pdf</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
 </Project>
