@@ -69,6 +69,7 @@ public static class BenchCommand
                 $"{allocated / (1024.0 * 1024.0):F1} MiB allocated)");
         }
 
+        int tokens = Math.Max(1, command.GetInt("tokens", 32));
         int[] prompt = model.BuildPrompt(preprocessed.Grid, "OCR:");
         using Tensor imageEmbeddings = model.Vision.Encode(preprocessed);
 
@@ -80,7 +81,7 @@ public static class BenchCommand
                 prompt,
                 imageEmbeddings,
                 preprocessed.Grid,
-                GenerationOptions.Default with { MaxNewTokens = 32 });
+                GenerationOptions.Default with { MaxNewTokens = tokens });
             TimeSpan elapsed = clock.Elapsed;
             long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 

@@ -141,7 +141,11 @@ SkiaSharp's resampler matches neither and is used only for decoding and encoding
 ## Engineering conventions
 
 - **.NET 10 / C# preview.** Use `System.Numerics.Tensors`, `Vector<T>` / `Vector512<T>`,
-  `TensorPrimitives`, `ArrayPool<T>` and `MemoryPool<T>`. Hot loops must be allocation-free.
+  `TensorPrimitives`, `ArrayPool<T>` and `MemoryPool<T>`. Hot loops must be allocation-free —
+  and "allocation-free" includes the compiler's own: a method that contains a lambda *anywhere*
+  allocates its display class on entry, whichever branch runs, so a hot method with a parallel
+  and a serial path must keep the lambda in a separate method. That one detail was 437 KiB per
+  vision attention layer.
 - **Weights stay in their on-disk dtype** (bf16) so a 0.9B model does not need a 4 GB float32
   shadow copy. The GEMM widens one column panel at a time and reuses it across every activation
   row; widening inside the inner loop instead costs more than the multiply-adds it feeds.

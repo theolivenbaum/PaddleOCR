@@ -87,6 +87,10 @@ Paddle module it came from. `--no-vl` and `--no-layout` time the halves separate
 On four cores with AVX-512, a 980×392 page takes roughly 16 s in the vision tower, 3.6 s to
 decode, and 5.2 s in the layout graph. CPU only for now.
 
+Every tensor in the hot loops is pooled: a whole vision pass allocates about 1.2 MiB, and a
+decode step about 310 KiB — all of it framework bookkeeping for the parallel loops, none of it
+tensors.
+
 ## Native AOT
 
 The CLI publishes as a self-contained native binary, no runtime installed:

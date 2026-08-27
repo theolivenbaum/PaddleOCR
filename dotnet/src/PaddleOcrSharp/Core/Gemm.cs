@@ -82,13 +82,30 @@ public static class Gemm
         int panel = ChoosePanelWidth(inner, cols, weight.Dtype);
         int panels = (cols + panel - 1) / panel;
 
+        RunPanelsInParallel(panels, panel, x, rows, inner, weight, bias, y, cols);
+    }
+
+    /// <summary>
+    /// Runs the column panels concurrently, kept out of <see cref="Linear"/> for the same reason
+    /// as <see cref="RunTilesInParallel"/>: a method holding a lambda pays for it on entry, and
+    /// <see cref="Linear"/> has a serial branch that a decode step takes many times per token.
+    /// </summary>
+    private static void RunPanelsInParallel(
+        int panels,
+        int panel,
+        ReadOnlyMemory<float> x,
+        int rows,
+        int inner,
+        WeightMatrix weight,
+        ReadOnlyMemory<float> bias,
+        Memory<float> y,
+        int cols) =>
         Parallel.For(0, panels, index =>
         {
             int start = index * panel;
             RunPanel(
                 x.Span, rows, inner, weight, bias.Span, y.Span, cols, start, Math.Min(panel, cols - start));
         });
-    }
 
     /// <summary>
     /// Chooses a column-panel width whose slice of the weight matrix stays inside L2.
@@ -483,33 +500,68 @@ public static class Gemm
         int columnTiles = ((n - 1) / columnBlock) + 1;
         int tiles = rowTiles * columnTiles;
 
-        void RunTile(int tile)
-        {
-            int row = (tile / columnTiles) * rowBlock;
-            int column = (tile % columnTiles) * columnBlock;
-            int rows = Math.Min(rowBlock, m - row);
-            int columns = Math.Min(columnBlock, n - column);
-
-            if (transposeB)
-            {
-                TransposedTile(left.Span, b.Span, y.Span, k, n, row, rows, column, columns);
-            }
-            else
-            {
-                DirectTile(left.Span, b.Span, y.Span, k, n, row, rows, column, columns);
-            }
-        }
-
+        // Neither branch may put a lambda in this method's body: attention calls it thousands of
+        // times per layer on the serial path, and a method containing a lambda allocates its
+        // display class on entry regardless of which branch runs. Hence the static helpers.
         if (allowParallel && tiles > 1 && (long)m * k * n >= ParallelThreshold)
         {
-            Parallel.For(0, tiles, RunTile);
+            RunTilesInParallel(tiles, left, b, y, m, k, n, transposeB, rowBlock, columnBlock, columnTiles);
         }
         else
         {
             for (int tile = 0; tile < tiles; tile++)
             {
-                RunTile(tile);
+                RunTile(tile, left, b, y, m, k, n, transposeB, rowBlock, columnBlock, columnTiles);
             }
+        }
+    }
+
+    /// <summary>
+    /// Runs the tiles concurrently. Separate from <see cref="MatMul"/> because a method that
+    /// contains a lambda allocates its display class on entry whether or not the branch holding
+    /// the lambda is taken, and the serial path here is the hot one.
+    /// </summary>
+    private static void RunTilesInParallel(
+        int tiles,
+        ReadOnlyMemory<float> a,
+        ReadOnlyMemory<float> b,
+        Memory<float> y,
+        int m,
+        int k,
+        int n,
+        bool transposeB,
+        int rowBlock,
+        int columnBlock,
+        int columnTiles) =>
+        Parallel.For(0, tiles, tile =>
+            RunTile(tile, a, b, y, m, k, n, transposeB, rowBlock, columnBlock, columnTiles));
+
+    /// <summary>Computes one tile of the output.</summary>
+    private static void RunTile(
+        int tile,
+        ReadOnlyMemory<float> a,
+        ReadOnlyMemory<float> b,
+        Memory<float> y,
+        int m,
+        int k,
+        int n,
+        bool transposeB,
+        int rowBlock,
+        int columnBlock,
+        int columnTiles)
+    {
+        int row = (tile / columnTiles) * rowBlock;
+        int column = (tile % columnTiles) * columnBlock;
+        int rows = Math.Min(rowBlock, m - row);
+        int columns = Math.Min(columnBlock, n - column);
+
+        if (transposeB)
+        {
+            TransposedTile(a.Span, b.Span, y.Span, k, n, row, rows, column, columns);
+        }
+        else
+        {
+            DirectTile(a.Span, b.Span, y.Span, k, n, row, rows, column, columns);
         }
     }
 

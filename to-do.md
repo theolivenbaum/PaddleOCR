@@ -145,7 +145,10 @@ orientation classifier.*
 ## 13. Hardening
 
 - [x] Multi-threading strategy + `ServerGC` tuning
-- [~] Allocation audit (decode is ~10 MiB/step; graph tensors now skip zero-initialisation)
+- [x] Allocation audit: every tensor in the hot loops is pooled. A vision pass allocates 1.2 MiB
+      per page (was 15) after removing display-class allocations from the GEMM entry points; a
+      decode step allocates ~310 KiB, which is `Parallel.For` task machinery across its 144
+      projections and would need a custom scheduler to remove.
 - [x] Benchmarks vs. Python reference (tokens/s, pages/min)
 - [x] GEMM/conv/attention blocking pass — layout graph 7.9s -> 5.2s, vision tower 19s -> 16s
 - [x] AOT-compatibility check for the CLI (publishes clean; `IsAotCompatible` guards regressions)

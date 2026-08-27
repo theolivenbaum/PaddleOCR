@@ -55,6 +55,7 @@ public static class Help
             bench options:
               --width <n> --height <n>   Synthetic page size (default: 1024x1024)
               --iterations <n>           Repeats per stage (default: 3)
+              --tokens <n>               Tokens to decode per iteration (default: 32)
               --no-vl                    Skip the vision tower and decoder
               --no-layout                Skip the layout graph
             """);
