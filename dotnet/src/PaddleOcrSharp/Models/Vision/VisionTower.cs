@@ -113,9 +113,9 @@ public sealed class VisionTower
     /// <returns>
     /// A tensor of <c>[grid.TokenCount(mergeSize), languageHiddenSize]</c>. The caller owns it.
     /// </returns>
-    public Tensor Encode(PreprocessedImage image, VisionTrace? trace = null)
+    public Tensor Encode(PreprocessedImage image, VisionTrace? trace = null, StageProfile? profile = null)
     {
-        using Tensor hidden = RunEncoder(image, trace);
+        using Tensor hidden = RunEncoder(image, trace, profile);
         return Project(hidden, image.Grid, trace);
     }
 
@@ -123,7 +123,7 @@ public sealed class VisionTower
     /// Runs patch embedding, the 27 encoder layers and the final layer norm, returning the
     /// per-patch hidden states of shape <c>[patches, hiddenSize]</c>.
     /// </summary>
-    public Tensor RunEncoder(PreprocessedImage image, VisionTrace? trace = null)
+    public Tensor RunEncoder(PreprocessedImage image, VisionTrace? trace = null, StageProfile? profile = null)
     {
         ImageGrid grid = image.Grid;
         int tokens = grid.PatchCount;
@@ -169,34 +169,90 @@ public sealed class VisionTower
         {
             LayerWeights layer = _layers[layerIndex];
 
-            hidden.Span.CopyTo(normed.Span);
-            Norms.LayerNormParallel(normed.Memory, width, layer.Norm1Weight, layer.Norm1Bias, _config.LayerNormEps);
+            using (profile?.Measure("norm"))
+            {
+                hidden.Span.CopyTo(normed.Span);
+                Norms.LayerNormParallel(normed.Memory, width, layer.Norm1Weight, layer.Norm1Bias, _config.LayerNormEps);
+            }
 
-            Gemm.Linear(normed.Memory, tokens, width, layer.Query, layer.QueryBias, packed.Memory, width);
-            SplitHeadsWithRope(packed.Span, queries.Span, tokens, heads, headDim, cos.Span, sin.Span);
+            using (profile?.Measure("qkv gemm"))
+            {
+                Gemm.Linear(normed.Memory, tokens, width, layer.Query, layer.QueryBias, packed.Memory, width);
+            }
 
-            Gemm.Linear(normed.Memory, tokens, width, layer.Key, layer.KeyBias, packed.Memory, width);
-            SplitHeadsWithRope(packed.Span, keys.Span, tokens, heads, headDim, cos.Span, sin.Span);
+            using (profile?.Measure("rope+split"))
+            {
+                SplitHeadsWithRope(packed.Span, queries.Span, tokens, heads, headDim, cos.Span, sin.Span);
+            }
 
-            Gemm.Linear(normed.Memory, tokens, width, layer.Value, layer.ValueBias, packed.Memory, width);
-            SplitHeads(packed.Span, values.Span, tokens, heads, headDim);
+            using (profile?.Measure("qkv gemm"))
+            {
+                Gemm.Linear(normed.Memory, tokens, width, layer.Key, layer.KeyBias, packed.Memory, width);
+            }
 
-            Attention.Bidirectional(
-                queries.Memory, keys.Memory, values.Memory, attention.Memory, heads, tokens, headDim, scale);
+            using (profile?.Measure("rope+split"))
+            {
+                SplitHeadsWithRope(packed.Span, keys.Span, tokens, heads, headDim, cos.Span, sin.Span);
+            }
 
-            MergeHeads(attention.Span, packed.Span, tokens, heads, headDim);
-            Gemm.Linear(packed.Memory, tokens, width, layer.Output, layer.OutputBias, normed.Memory, width);
-            Kernels.AddInPlace(hidden.Span, normed.Span);
+            using (profile?.Measure("qkv gemm"))
+            {
+                Gemm.Linear(normed.Memory, tokens, width, layer.Value, layer.ValueBias, packed.Memory, width);
+            }
 
-            hidden.Span.CopyTo(normed.Span);
-            Norms.LayerNormParallel(normed.Memory, width, layer.Norm2Weight, layer.Norm2Bias, _config.LayerNormEps);
+            using (profile?.Measure("rope+split"))
+            {
+                SplitHeads(packed.Span, values.Span, tokens, heads, headDim);
+            }
 
-            Gemm.Linear(
-                normed.Memory, tokens, width, layer.Fc1, layer.Fc1Bias, intermediate.Memory, _config.IntermediateSize);
-            Kernels.GeluTanh(intermediate.Span);
-            Gemm.Linear(
-                intermediate.Memory, tokens, _config.IntermediateSize, layer.Fc2, layer.Fc2Bias, normed.Memory, width);
-            Kernels.AddInPlace(hidden.Span, normed.Span);
+            using (profile?.Measure("attention"))
+            {
+                Attention.Bidirectional(
+                    queries.Memory, keys.Memory, values.Memory, attention.Memory, heads, tokens, headDim, scale);
+            }
+
+            using (profile?.Measure("rope+split"))
+            {
+                MergeHeads(attention.Span, packed.Span, tokens, heads, headDim);
+            }
+
+            using (profile?.Measure("out gemm"))
+            {
+                Gemm.Linear(packed.Memory, tokens, width, layer.Output, layer.OutputBias, normed.Memory, width);
+            }
+
+            using (profile?.Measure("residual"))
+            {
+                Kernels.AddInPlace(hidden.Span, normed.Span);
+            }
+
+            using (profile?.Measure("norm"))
+            {
+                hidden.Span.CopyTo(normed.Span);
+                Norms.LayerNormParallel(normed.Memory, width, layer.Norm2Weight, layer.Norm2Bias, _config.LayerNormEps);
+            }
+
+            using (profile?.Measure("mlp gemm"))
+            {
+                Gemm.Linear(
+                    normed.Memory, tokens, width, layer.Fc1, layer.Fc1Bias, intermediate.Memory, _config.IntermediateSize);
+            }
+
+            using (profile?.Measure("gelu"))
+            {
+                Kernels.GeluTanh(intermediate.Span);
+            }
+
+            using (profile?.Measure("mlp gemm"))
+            {
+                Gemm.Linear(
+                    intermediate.Memory, tokens, _config.IntermediateSize, layer.Fc2, layer.Fc2Bias, normed.Memory, width);
+            }
+
+            using (profile?.Measure("residual"))
+            {
+                Kernels.AddInPlace(hidden.Span, normed.Span);
+            }
 
             trace?.Record($"layer{layerIndex}", hidden.Span, tokens, width);
         }

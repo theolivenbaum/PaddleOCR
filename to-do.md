@@ -124,6 +124,16 @@ orientation classifier.*
 - [ ] Store boolean tensors in a byte-wide buffer. `PaddleTensor` backs them with `long[]`, so a
       `[1, 300, 200, 200]` mask costs 96 MB instead of 12 and its first touch is page-fault bound.
       The remaining elementwise time in the layout graph is mostly this.
+- [x] Per-stage profile for the hand-written towers (`StageProfile`), the counterpart of
+      `PirProfile` for the layout graph
+- [x] Verified against the original: the same three pages, both pipelines back to back on one
+      machine at their own defaults, 131.9 s Python against 68.3 s here with byte-identical
+      markdown. Recorded in CLAUDE.md; the published comparison is corrected.
+- [ ] Attention is 44% of the vision tower and reaches about a third of the matrix products'
+      throughput. Its score product reduces along an inner dimension of 72, which is too short
+      for the kernel; a flash-attention-shaped rewrite that tiles over keys with a running
+      maximum is the way in. Key and value bandwidth is *not* the limit — halving those reads
+      changed nothing.
 - [ ] Convolution is now a third of the layout graph and is the next thing worth attacking
 
 ## 10. Pipeline — `src/PaddleOcrSharp/Pipeline`

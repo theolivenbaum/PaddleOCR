@@ -2,6 +2,7 @@ using System.Diagnostics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
+using PaddleOcrSharp.Models.Vision;
 using PaddleOcrSharp.Models.Layout;
 using PaddleOcrSharp.Models.Paddle;
 
@@ -73,9 +74,10 @@ public static class BenchCommand
 
         for (int i = 0; i < iterations; i++)
         {
+            var stages = i == iterations - 1 ? new StageProfile() : null;
             long before = GC.GetTotalAllocatedBytes(precise: true);
             clock.Restart();
-            using Tensor embeddings = model.Vision.Encode(preprocessed);
+            using Tensor embeddings = model.Vision.Encode(preprocessed, profile: stages);
             TimeSpan elapsed = clock.Elapsed;
             long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 
@@ -83,6 +85,13 @@ public static class BenchCommand
                 $"Vision  [{i}]: {elapsed.TotalMilliseconds:F0}ms " +
                 $"({preprocessed.Grid.PatchCount / elapsed.TotalSeconds:F0} patches/s, " +
                 $"{allocated / (1024.0 * 1024.0):F1} MiB allocated)");
+
+            if (stages is not null)
+            {
+                Console.WriteLine();
+                Console.WriteLine(stages);
+                Console.WriteLine();
+            }
         }
 
         int tokens = Math.Max(1, command.GetInt("tokens", 32));
