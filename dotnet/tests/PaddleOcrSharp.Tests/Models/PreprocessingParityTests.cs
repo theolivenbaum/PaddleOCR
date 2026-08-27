@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Formats;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Paddle;
 using PaddleOcrSharp.Models.Preprocessing;
@@ -68,6 +69,28 @@ public class PreprocessingParityTests
         // Our resize is OpenCV-compatible to within a level, so the score can drift a little
         // further than the graph-only comparison above allows.
         Assert.Equal(expected[Argmax(expected)], score, 0.01f);
+    }
+
+    [Fact]
+    public void CorrectingARotatedPageRestoresIt()
+    {
+        Fixture.RequireOrSkip(FixtureName);
+        PreprocessingModelFixture.RequireOrientationOrSkip();
+
+        var fixtures = Fixture.Load(FixtureName);
+        NpyArray upright = fixtures["ori_upright_source"];
+        NpyArray rotated = fixtures["ori_rotated_source"];
+
+        using RgbImage page = RgbImage.From(rotated.ToBytes(), rotated.Shape[1], rotated.Shape[0]);
+        using var classifier = DocOrientationClassifier.Load(
+            PreprocessingModelFixture.OrientationDirectory!);
+        using RgbImage corrected = classifier.Correct(page);
+
+        // The fixture's rotated page is the upright one turned a quarter clockwise, so correcting
+        // it has to turn it back — the direction the rotation goes is the whole point.
+        Assert.Equal(upright.Shape[1], corrected.Width);
+        Assert.Equal(upright.Shape[0], corrected.Height);
+        Assert.Equal(upright.ToBytes(), corrected.Pixels.ToArray());
     }
 
     [Fact]

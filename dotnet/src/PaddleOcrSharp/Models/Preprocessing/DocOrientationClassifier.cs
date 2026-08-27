@@ -77,7 +77,15 @@ public sealed class DocOrientationClassifier : IDisposable
         return angle == 0 ? page.Clone() : Rotate(page, angle);
     }
 
-    /// <summary>Rotates an image clockwise by 90, 180 or 270 degrees.</summary>
+    /// <summary>
+    /// Rotates an image counter-clockwise by 90, 180 or 270 degrees.
+    /// </summary>
+    /// <remarks>
+    /// Counter-clockwise because that is the direction <c>rotate_image</c> turns — it goes through
+    /// <c>cv2.getRotationMatrix2D</c>, where a positive angle is counter-clockwise — and the angle
+    /// it is given is the classifier's own prediction. Turning the other way would take a page the
+    /// model called 90 degrees and leave it at 270.
+    /// </remarks>
     public static RgbImage Rotate(RgbImage image, int degrees)
     {
         int normalised = ((degrees % 360) + 360) % 360;
@@ -98,9 +106,9 @@ public sealed class DocOrientationClassifier : IDisposable
             {
                 (int tx, int ty) = normalised switch
                 {
-                    90 => (image.Height - 1 - y, x),
+                    90 => (y, image.Width - 1 - x),
                     180 => (image.Width - 1 - x, image.Height - 1 - y),
-                    _ => (y, image.Width - 1 - x),
+                    _ => (image.Height - 1 - y, x),
                 };
 
                 Span<byte> target = result.Row(ty);
