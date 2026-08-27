@@ -149,6 +149,8 @@ SkiaSharp's resampler matches neither and is used only for decoding and encoding
   point that the parity tests feed with `.npz` fixtures dumped from the Python reference.
 - **No `float` accumulation shortcuts** where upstream forces `float32` (softmax, RoPE,
   RMSNorm variance) — match upstream precision decisions exactly.
+- **Stay native-AOT publishable.** Both libraries set `IsAotCompatible`, so the trim and AOT
+  analysers run on every build; JSON goes through a source-generated context, not reflection.
 
 ## Validating against upstream
 

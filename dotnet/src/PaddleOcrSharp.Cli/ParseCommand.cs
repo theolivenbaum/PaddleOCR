@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Layout;
 using PaddleOcrSharp.Pdf;
@@ -109,9 +110,7 @@ public static class ParseCommand
                 using (image)
                 {
                     clock.Restart();
-                    var progress = new Progress<BlockProgress>(value =>
-                        Console.Error.Write(
-                            $"\r  block {value.BlockIndex + 1}/{value.BlockCount} ({value.Label})      "));
+                    var progress = new ConsoleBlockProgress();
 
                     ParsedPage page = parser.Parse(image, options, pageIndex, progress, cancellation.Token);
                     Console.Error.WriteLine(
@@ -199,20 +198,63 @@ public static class ParseCommand
     }
 
     private static string ToJson(IReadOnlyList<ParsedPage> pages) => JsonSerializer.Serialize(
-        pages.Select(page => new
-        {
-            page_index = page.Index,
-            width = page.Width,
-            height = page.Height,
-            blocks = page.Blocks.Select(block => new
-            {
-                label = block.Label,
-                reading_order = block.ReadingOrder,
-                score = block.Box.Score,
-                bbox = new[] { block.Box.Left, block.Box.Top, block.Box.Right, block.Box.Bottom },
-                content = block.Content,
-                image = block.ImagePath,
-            }),
-        }),
-        new JsonSerializerOptions { WriteIndented = true });
+        pages.Select(page => new JsonPage(
+            page.Index,
+            page.Width,
+            page.Height,
+            [.. page.Blocks.Select(block => new JsonBlock(
+                block.Label,
+                block.ReadingOrder,
+                block.Box.Score,
+                [block.Box.Left, block.Box.Top, block.Box.Right, block.Box.Bottom],
+                block.Content,
+                block.ImagePath))]))
+            .ToArray(),
+        ResultJson.Default.JsonPageArray);
 }
+
+/// <summary>Writes block progress to standard error, on the calling thread.</summary>
+/// <remarks>
+/// Not <see cref="Progress{T}"/>: that posts each callback to the thread pool, so a report can
+/// land after the line that is meant to replace it and leave a half-written progress line in the
+/// output. Reporting happens once per block and costs nothing worth deferring.
+/// </remarks>
+internal sealed class ConsoleBlockProgress : IProgress<BlockProgress>
+{
+    private readonly Lock _gate = new();
+
+    /// <inheritdoc />
+    public void Report(BlockProgress value)
+    {
+        lock (_gate)
+        {
+            Console.Error.Write($"\r  block {value.BlockIndex + 1}/{value.BlockCount} ({value.Label})      ");
+        }
+    }
+}
+
+/// <summary>One page of the JSON result.</summary>
+/// <remarks>
+/// Declared rather than anonymous, and serialised through a generated context, so the CLI stays
+/// publishable with native AOT — reflection-based serialisation is the one thing in the tree the
+/// trimmer cannot see through.
+/// </remarks>
+internal sealed record JsonPage(
+    [property: JsonPropertyName("page_index")] int PageIndex,
+    [property: JsonPropertyName("width")] int Width,
+    [property: JsonPropertyName("height")] int Height,
+    [property: JsonPropertyName("blocks")] JsonBlock[] Blocks);
+
+/// <summary>One recognised block of a page.</summary>
+internal sealed record JsonBlock(
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("reading_order")] int ReadingOrder,
+    [property: JsonPropertyName("score")] float Score,
+    [property: JsonPropertyName("bbox")] float[] BoundingBox,
+    [property: JsonPropertyName("content")] string Content,
+    [property: JsonPropertyName("image")] string? Image);
+
+/// <summary>Serialisation context for the CLI's JSON output.</summary>
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(JsonPage[]))]
+internal sealed partial class ResultJson : JsonSerializerContext;

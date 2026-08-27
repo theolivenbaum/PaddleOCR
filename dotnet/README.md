@@ -72,6 +72,7 @@ expectations:
 | Tokenizer | encode and decode over 27 mixed-script cases, including byte fallback and the `<\|LOC_n\|>` tokens |
 | Decoder | prompt ids, 3-D rope index, prefill logits and 24 greedy steps, token for token |
 | Layout graph | every fetched tensor against Paddle's own inference run |
+| Orientation classifier, UVDoc | both graphs against Paddle's own run, and both wrappers end to end |
 | Whole pipeline | block labels, boxes and recognised text for a rendered page |
 
 Run them with `dotnet test`. Tests that need the checkpoints or the generated fixtures skip
@@ -80,8 +81,22 @@ themselves when those are absent, so a clean clone still goes green.
 ## Performance
 
 `paddleocr-sharp bench` reports per-stage timings, allocation, and a per-operator breakdown of
-the layout graph. On four cores with AVX-512, a 980×392 page takes roughly 20 s in the vision
-tower, 4 s to decode, and 10 s in the layout graph. CPU only for now.
+the layout graph — including each operator's slowest single call, with its result shape and the
+Paddle module it came from. `--no-vl` and `--no-layout` time the halves separately.
+
+On four cores with AVX-512, a 980×392 page takes roughly 16 s in the vision tower, 3.6 s to
+decode, and 5.2 s in the layout graph. CPU only for now.
+
+## Native AOT
+
+The CLI publishes as a self-contained native binary, no runtime installed:
+
+```bash
+dotnet publish src/PaddleOcrSharp.Cli -c Release -r linux-x64 -p:PublishAot=true
+```
+
+Both libraries build with `IsAotCompatible`, so the trim and AOT analysers run on every build
+and a reflection-based API cannot creep in unnoticed.
 
 ## Licence
 

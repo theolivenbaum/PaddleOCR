@@ -5,6 +5,9 @@
     <AssemblyName>PaddleOcrSharp</AssemblyName>
     <IsPackable>true</IsPackable>
     <PackageId>PaddleOcrSharp</PackageId>
+    <!-- Runs the trim and AOT analysers on every build, so a reflection-based API cannot creep
+         in unnoticed: the CLI publishes with native AOT and must keep doing so. -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <ItemGroup>

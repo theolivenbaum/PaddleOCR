@@ -6,6 +6,9 @@
     <IsPackable>true</IsPackable>
     <PackageId>PaddleOcrSharp.Pdf</PackageId>
     <Description>PDF page rasterisation for PaddleOcrSharp.</Description>
+    <!-- Runs the trim and AOT analysers on every build, so a reflection-based API cannot creep
+         in unnoticed: the CLI publishes with native AOT and must keep doing so. -->
+    <IsAotCompatible>true</IsAotCompatible>
     <!-- PDFium ships for every platform we target; the analyser cannot see that from the
          package's support annotations. -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
