@@ -162,16 +162,31 @@ Tests that need fixtures are skipped, not failed, when the fixture directory is 
 
 ## Where the time goes
 
-Measured with `paddleocr-sharp bench` on 4 cores (AVX-512), a 980×392 page:
+Measured with `paddleocr-sharp bench` on 4 cores (AVX-512), a 980x392 page (1960 patches).
+`--no-vl` and `--no-layout` time the halves separately, which is what the layout figure needs —
+run together, the two compete for the same cache.
 
 | Stage | Cost |
 | --- | --- |
-| Vision tower (1960 patches) | ~19 s |
-| Decoder (503-token prefill + 32 tokens) | ~5 s |
-| Layout graph | ~9-12 s |
+| Vision tower (1960 patches) | ~16 s |
+| Decoder (503-token prefill + 32 tokens) | ~3.6 s |
+| Layout graph | ~5.2 s |
 
-The layout graph's own profile (`PirProfile`, printed by `bench`) attributes roughly a quarter
-of its time to `conv2d` and the rest to the element-wise and shape operators around it.
+Both halves are GEMM-bound, and the shape of the win is the same in each: give the inner loop
+enough reuse that it is compute-bound rather than load-bound. `Gemm.Linear` widens a bf16 column
+panel once and reuses it across every activation row; `Gemm.MatMul` tiles the output and picks
+its kernel from the operand layout; attention blocks 16 query rows at a time so the keys and
+values stay in cache across the block; the convolution treats an output row as one GEMM against
+its im2col columns rather than a dot product per output pixel.
+
+`PirProfile` (printed by `bench`) reports each operator's total, its slowest single call, and
+that call's result shape and Paddle module path. The shape column is what makes the layout
+graph's cost legible — nearly a fifth of it is element-wise work on the mask head's
+`[1, 300, 200, 200]` tensors, not the convolutions.
+
+Not every plausible idea survives measurement: banding `Gemm.Linear` over activation rows, so a
+band stays cached across all the column panels, is a clear win on paper and was consistently
+slower in practice. The panel loop's traffic is evidently already absorbed by the shared cache.
 
 ## Working agreements for this port
 

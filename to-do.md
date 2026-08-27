@@ -125,6 +125,7 @@ orientation classifier.*
 - [x] `bench` — throughput and allocation report
 - [x] `dump` — internal tensors via `VisionTrace` / `IPirTrace`, operator timings via `bench`
 - [ ] Progress + structured logging
+- [x] `bench --no-vl` / `--no-layout`; `--no-<flag>` now actually parses
 
 ## 12. Reference tooling — `dotnet/tools/reference`
 
@@ -142,5 +143,6 @@ orientation classifier.*
 - [x] Multi-threading strategy + `ServerGC` tuning
 - [~] Allocation audit (decode is ~10 MiB/step; graph tensors now skip zero-initialisation)
 - [x] Benchmarks vs. Python reference (tokens/s, pages/min)
+- [x] GEMM/conv/attention blocking pass — layout graph 7.9s -> 5.2s, vision tower 19s -> 16s
 - [ ] AOT-compatibility check for the CLI
 - [~] Public API review + XML docs (every public member documented; a shape review is still open)

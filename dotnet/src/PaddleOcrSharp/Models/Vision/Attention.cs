@@ -6,10 +6,10 @@ namespace PaddleOcrSharp.Models.Vision;
 /// Scaled dot-product attention over a single packed sequence, laid out per head.
 /// </summary>
 /// <remarks>
-/// One score row is materialised at a time, so a long sequence never needs a full
-/// <c>[tokens, tokens]</c> matrix — a 5120-patch page would be 100 MB per head. Work is split
-/// across heads, and each head transposes its values once so the weighted sum is a long dot
-/// product per output channel rather than a short scaled add per key.
+/// Scores are materialised a block of query rows at a time, so a long sequence never needs a
+/// full <c>[tokens, tokens]</c> matrix — a 5120-patch page would be 100 MB per head — while the
+/// block still gives the keys and values enough reuse to stay in cache across it. A row at a
+/// time streamed the whole key matrix past for every single query. Work is split across heads.
 /// </remarks>
 public static class Attention
 {
@@ -34,47 +34,58 @@ public static class Attention
         int headDim,
         float scale)
     {
+        // Wide enough that a block amortises the key and value traffic, narrow enough that the
+        // scores stay well inside L2 (16 x 5120 floats is 320 KB at the largest page we accept).
+        const int Block = 16;
+
         Parallel.For(0, heads, head =>
         {
             int headOffset = head * tokens * headDim;
 
-            // Values are transposed once per head so the weighted sum becomes one long dot
-            // product per output channel instead of a short scaled add per key.
-            using PooledBuffer transposed = TensorPool.Rent(headDim * tokens);
-            Span<float> valueColumns = transposed.Span;
-            ReadOnlySpan<float> v = values.Span.Slice(headOffset, tokens * headDim);
+            ReadOnlyMemory<float> k = keys.Slice(headOffset, tokens * headDim);
+            ReadOnlyMemory<float> v = values.Slice(headOffset, tokens * headDim);
 
-            for (int token = 0; token < tokens; token++)
+            using PooledBuffer buffer = TensorPool.Rent(Block * tokens);
+            Memory<float> scores = buffer.Memory;
+
+            for (int start = 0; start < tokens; start += Block)
             {
-                for (int d = 0; d < headDim; d++)
+                int rows = Math.Min(Block, tokens - start);
+                Memory<float> block = scores[..(rows * tokens)];
+
+                // Keys are the reduction vectors, so the score block is a product against a
+                // transposed right-hand operand.
+                Gemm.MatMul(
+                    queries.Slice(headOffset + (start * headDim), rows * headDim),
+                    rows,
+                    headDim,
+                    transposeA: false,
+                    k,
+                    tokens,
+                    transposeB: true,
+                    block,
+                    allowParallel: false);
+
+                Span<float> rowsSpan = block.Span;
+                for (int row = 0; row < rows; row++)
                 {
-                    valueColumns[(d * tokens) + token] = v[(token * headDim) + d];
-                }
-            }
-
-            using PooledBuffer scores = TensorPool.Rent(tokens);
-            Span<float> scoreRow = scores.Span;
-
-            ReadOnlySpan<float> q = queries.Span.Slice(headOffset, tokens * headDim);
-            ReadOnlySpan<float> k = keys.Span.Slice(headOffset, tokens * headDim);
-            Span<float> o = output.Span.Slice(headOffset, tokens * headDim);
-
-            for (int i = 0; i < tokens; i++)
-            {
-                ReadOnlySpan<float> queryRow = q.Slice(i * headDim, headDim);
-
-                for (int j = 0; j < tokens; j++)
-                {
-                    scoreRow[j] = Gemm.Dot(queryRow, k.Slice(j * headDim, headDim)) * scale;
+                    Span<float> scoreRow = rowsSpan.Slice(row * tokens, tokens);
+                    Kernels.Scale(scoreRow, scale);
+                    Kernels.Softmax(scoreRow);
                 }
 
-                Kernels.Softmax(scoreRow);
-
-                Span<float> outputRow = o.Slice(i * headDim, headDim);
-                for (int d = 0; d < headDim; d++)
-                {
-                    outputRow[d] = Gemm.Dot(scoreRow, valueColumns.Slice(d * tokens, tokens));
-                }
+                // Values are indexed by key, which is the reduction axis here, so this one is a
+                // direct product — no transpose of the values needed.
+                Gemm.MatMul(
+                    block,
+                    rows,
+                    tokens,
+                    transposeA: false,
+                    v,
+                    headDim,
+                    transposeB: false,
+                    output.Slice(headOffset + (start * headDim), rows * headDim),
+                    allowParallel: false);
             }
         });
     }
