@@ -303,6 +303,48 @@ byte-identical output. It stays at 1 by default because the win is a property of
 page of few large blocks has no idle cores to fill — and the cost is holding several blocks'
 activations at once.
 
+#### Upstream has the same runaway, and no stop for it
+
+The early stop is a deliberate divergence, so it is worth being precise that what it skips is not
+something upstream keeps. Upstream cannot stop either, by construction:
+
+- PaddleX's local backend builds `generate_kwargs` out of **`max_new_tokens` and nothing else**
+  (`doc_vlm/predictor.py`); `repetition_penalty`, `temperature` and `top_p` are each warned about
+  and dropped. The server backends send a temperature and a token cap. The default budget is
+  `PADDLEOCR_VL_MAX_NEW_TOKENS = 8192`, which is where our own default comes from.
+- The checkpoint's `generation_config.json` sets only `eos_token_id`, `pad_token_id` and
+  `use_cache` — no `no_repeat_ngram_size`, no stopping criteria — and the model is a stock
+  `GenerationMixin`. Greedy decoding there ends on the stop token or on the budget.
+- `truncate_repetitive_content` exists precisely because of that: upstream generates the runaway
+  tail and then throws it away.
+
+Measured rather than inferred, with `tools/reference/probe_runaway_decode.py`, on the crop of the
+block that runs away — upstream's own checkpoint through `transformers`, greedy, no penalties:
+
+| | tokens | stopped on EOS | time |
+| --- | --- | --- | --- |
+| upstream, capped at 400 | 400 | no | 19 s |
+| upstream, at its own 8192 default | 8,192 | no | **525 s** |
+
+One block, nearly nine minutes, and the page has two of them. The output is `This is text.`
+repeated until the budget runs out, which is the same text this port produced before the stop.
+
+The two implementations then agree on what survives, which is what pins the divergence down to
+string length rather than to the port. Upstream's own `truncate_repetitive_content`, at the
+`min_count` its pipeline passes for a non-table block (50, and 5000 for a table — the values
+`RepetitionTruncator` uses), returns:
+
+| given | returns |
+| --- | --- |
+| upstream's 8,192-token output (28,671 chars) | `This is text.` ×3 |
+| this port's stopped 384-token output (1,343 chars) | `This is text.` ×1 |
+
+Both are upstream's function on the respective strings; the shorter one takes the
+shortest-repeating-unit branch instead of the suffix branch. So the port's pre-stop output matched
+upstream exactly, and its post-stop output is what upstream's own truncator makes of a shorter
+decode of the same cycle. Neither is the page's text — the source repeats that sentence
+thirty-one times and no decode of it terminated.
+
 **Eight of the nine pages come out byte-identical**, and the detector fired on exactly two blocks in
 the whole corpus — the two runaway ones. The ninth page differs only in how many copies of a
 sentence the source repeats thirty-one times survive: three before, one after. Both are the
