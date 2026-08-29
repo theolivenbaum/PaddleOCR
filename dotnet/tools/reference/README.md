@@ -100,6 +100,21 @@ paddleocr-sharp parse /tmp/compare/report.png --output /tmp/compare
 That needs PaddleX importable rather than exec'd, since the whole pipeline is what is being run.
 The output is what the side-by-side comparison of the two implementations is built from.
 
+## Settling a behavioural question
+
+`probe_runaway_decode.py` is the other non-fixture script. It loads the checkpoint through
+`transformers` and calls `generate` with the arguments PaddleX's local backend passes — greedy, a
+token cap, no penalties — so that a claim about what upstream *does* can be measured instead of
+read off the source:
+
+```bash
+python3 probe_runaway_decode.py page.png 8192 --box 138,409,1008,545 --prompt "OCR:"
+```
+
+It prints whether generation stopped on the stop token or ran to the cap. It is what established
+that upstream has no stop for a decode that has fallen into a cycle, which is the case for
+`GenerationOptions.StopOnRepetition` — see the CLAUDE.md section of that name.
+
 ## Debugging a mismatch
 
 Both model families can dump their intermediates:

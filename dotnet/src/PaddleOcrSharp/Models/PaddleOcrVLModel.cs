@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Language;
@@ -92,32 +93,74 @@ public sealed class PaddleOcrVLModel : IDisposable
     /// <param name="instruction">Task prompt, e.g. <c>"OCR:"</c>.</param>
     /// <param name="preprocessing">Pixel-budget settings for this block.</param>
     /// <param name="generation">Decoding settings.</param>
+    /// <param name="profile">Optional collector for what this call cost.</param>
+    /// <param name="label">Name this call is reported under when <paramref name="profile"/> is given.</param>
     /// <param name="cancellationToken">Cancels generation between tokens.</param>
     public string Recognize(
         RgbImage image,
         string instruction,
         VisionPreprocessorOptions? preprocessing = null,
         GenerationOptions? generation = null,
+        RecognitionProfile? profile = null,
+        string? label = null,
         CancellationToken cancellationToken = default)
     {
         using PreprocessedImage preprocessed = VisionPreprocessor.Preprocess(
             image, preprocessing ?? VisionPreprocessorOptions.Default);
 
-        return Recognize(preprocessed, instruction, generation, cancellationToken);
+        return Recognize(preprocessed, instruction, generation, profile, label, cancellationToken);
     }
 
     /// <summary>Runs the model on an already-preprocessed image.</summary>
+    /// <param name="image">Preprocessed block image.</param>
+    /// <param name="instruction">Task prompt, e.g. <c>"OCR:"</c>.</param>
+    /// <param name="generation">Decoding settings.</param>
+    /// <param name="profile">Optional collector for what this call cost.</param>
+    /// <param name="label">Name this call is reported under when <paramref name="profile"/> is given.</param>
+    /// <param name="cancellationToken">Cancels generation between tokens.</param>
     public string Recognize(
         PreprocessedImage image,
         string instruction,
         GenerationOptions? generation = null,
+        RecognitionProfile? profile = null,
+        string? label = null,
         CancellationToken cancellationToken = default)
     {
         GenerationOptions options = generation ?? GenerationOptions.Default;
         int[] prompt = BuildPrompt(image.Grid, instruction);
 
+        if (profile is null)
+        {
+            using Tensor plain = Vision.Encode(image);
+            return Tokenizer.Decode(
+                Generate(prompt, plain, image.Grid, options, out _, cancellationToken),
+                options.SkipSpecialTokens);
+        }
+
+        long threadStart = GC.GetAllocatedBytesForCurrentThread();
+        long totalStart = GC.GetTotalAllocatedBytes(precise: false);
+        long visionStart = Stopwatch.GetTimestamp();
+
         using Tensor imageEmbeddings = Vision.Encode(image);
-        List<int> generated = Generate(prompt, imageEmbeddings, image.Grid, options, cancellationToken);
+        TimeSpan vision = Stopwatch.GetElapsedTime(visionStart);
+
+        List<int> generated = Generate(
+            prompt, imageEmbeddings, image.Grid, options, out GenerationStats stats, cancellationToken);
+
+        profile.Add(new RecognitionRecord(
+            label ?? string.Empty,
+            image.Grid.Height * image.Grid.Width * image.Grid.Temporal,
+            stats.PromptTokens,
+            stats.GeneratedTokens,
+            stats.HitTokenBudget,
+            stats.StoppedEarly,
+            vision,
+            stats.Prefill,
+            stats.Decode,
+            stats.DecodeLogits,
+            GC.GetAllocatedBytesForCurrentThread() - threadStart,
+            Math.Max(0, GC.GetTotalAllocatedBytes(precise: false) - totalStart)));
+
         return Tokenizer.Decode(generated, options.SkipSpecialTokens);
     }
 
@@ -134,6 +177,26 @@ public sealed class PaddleOcrVLModel : IDisposable
         Tensor imageEmbeddings,
         ImageGrid grid,
         GenerationOptions options,
+        CancellationToken cancellationToken = default) =>
+        Generate(prompt, imageEmbeddings, grid, options, out _, cancellationToken);
+
+    /// <summary>
+    /// Prefills the prompt and decodes until the stop token, the token budget, or - when
+    /// <see cref="GenerationOptions.StopOnRepetition"/> is set - the point at which the output has
+    /// provably fallen into a loop.
+    /// </summary>
+    /// <param name="prompt">Prompt token ids, with image placeholders already expanded.</param>
+    /// <param name="imageEmbeddings">Projected image features, one row per placeholder.</param>
+    /// <param name="grid">Patch grid of the image, for the 3-D rope index.</param>
+    /// <param name="options">Decoding settings.</param>
+    /// <param name="stats">What the call cost.</param>
+    /// <param name="cancellationToken">Cancels generation between tokens.</param>
+    public List<int> Generate(
+        int[] prompt,
+        Tensor imageEmbeddings,
+        ImageGrid grid,
+        GenerationOptions options,
+        out GenerationStats stats,
         CancellationToken cancellationToken = default)
     {
         LanguageConfig config = Configuration.Language;
@@ -149,17 +212,30 @@ public sealed class PaddleOcrVLModel : IDisposable
         Decoder.Embed(prompt, hidden.Span);
         ScatterImageEmbeddings(prompt, imageEmbeddings, hidden.Span, config.ImageTokenId, width);
 
+        long prefillStart = Stopwatch.GetTimestamp();
+
         using KvCache cache = Decoder.CreateCache(prompt.Length + Math.Min(options.MaxNewTokens, 1024));
         Decoder.Forward(hidden.Memory, prompt.Length, positions, cache);
 
         using PooledBuffer logits = TensorPool.Rent(config.VocabSize);
         Decoder.Logits(hidden.Memory.Slice((prompt.Length - 1) * width, width), logits.Memory);
 
+        TimeSpan prefill = Stopwatch.GetElapsedTime(prefillStart);
+        long decodeStart = Stopwatch.GetTimestamp();
+
         var sampler = new Sampler(options);
         var generated = new List<int>(Math.Min(options.MaxNewTokens, 512));
 
         using Tensor step = Tensor.Rent(1, width);
         int nextPosition = prompt.Length + delta;
+
+        var loop = new LoopDetector(options);
+        bool hitBudget = false;
+        bool stoppedEarly = false;
+        long logitsTicks = 0;
+
+        // One reusable slot: `Embed([token], ...)` would allocate a fresh array per token.
+        Span<int> one = stackalloc int[1];
 
         for (int i = 0; i < options.MaxNewTokens; i++)
         {
@@ -172,19 +248,44 @@ public sealed class PaddleOcrVLModel : IDisposable
             }
 
             generated.Add(token);
-            if (i == options.MaxNewTokens - 1)
+
+            // A block whose decoder has fallen into a cycle will not leave it: every later token is
+            // produced from a state the loop already reproduced. Nothing after this point survives
+            // `RepetitionTruncator`, so continuing to the budget only buys a longer string to throw
+            // away - and, because attention re-reads the whole cache, an increasingly expensive one.
+            if (loop.IsLooping(generated))
             {
+                stoppedEarly = true;
                 break;
             }
 
-            Decoder.Embed([token], step.Span);
+            if (i == options.MaxNewTokens - 1)
+            {
+                hitBudget = true;
+                break;
+            }
+
+            one[0] = token;
+            Decoder.Embed(one, step.Span);
 
             // Generated tokens are pure text, so all three rope axes advance together from the
             // prompt's final position plus the delta `get_rope_index` returned.
             PositionIds stepPosition = PositionIds.Sequential(1, nextPosition + i);
             Decoder.Forward(step.Memory, 1, stepPosition, cache);
+
+            long logitsStart = Stopwatch.GetTimestamp();
             Decoder.Logits(step.Memory, logits.Memory);
+            logitsTicks += Stopwatch.GetTimestamp() - logitsStart;
         }
+
+        stats = new GenerationStats(
+            prompt.Length,
+            generated.Count,
+            hitBudget,
+            stoppedEarly,
+            prefill,
+            Stopwatch.GetElapsedTime(decodeStart),
+            Stopwatch.GetElapsedTime(0, logitsTicks));
 
         return generated;
     }

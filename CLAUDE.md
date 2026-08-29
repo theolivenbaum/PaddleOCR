@@ -241,6 +241,118 @@ which is where the remaining work is.
 call's result shape and Paddle module path. The shape column is what makes the layout graph's cost
 legible.
 
+### A page's cost is not the sum of its blocks
+
+`RecognitionProfile` (printed by `parse --profile`) is the VL half's answer to those two: one row
+per block, giving the patches encoded, the prompt length, the **tokens generated**, the split
+between vision, prefill and decode, the share of decode spent in the output head, and the bytes
+allocated. The generated-token count is the column that matters, because a block's cost is set by
+how much it says rather than by how big it is.
+
+Decoding is bandwidth-bound on weight streaming, which is what makes that so. Every generated token
+re-reads the 18 decoder layers (255M parameters) and the untied `lm_head` (106M), so **721 MB of
+bf16 weights per token** before the key/value cache is counted — and the cache adds another 302 MB
+per token once the context reaches 8k. The profile shows both halves of that directly: a block
+decoding a few dozen tokens runs at ~40 ms/token with the output head taking 19-20% of decode,
+while a block that reached 8k runs at ~85 ms/token with the head down to 9% — same weights, same
+head, twice the cost, because the cache it re-reads has grown past the weights themselves. The head
+is not worth attacking either way: greedy selection needs every logit, so its 212 MB is
+irreducible.
+
+The consequence is that a decoder which stops converging is not a quality problem with a
+performance footnote, it is the performance problem. Measured on `equations.docx` page 1, fifteen
+blocks, before the early stop below:
+
+| | tokens | decode | allocated | share of page |
+| --- | --- | --- | --- | --- |
+| two runaway `text` blocks | 16,384 | 1,379 s | 5.1 GiB | 94.9% |
+| the other thirteen blocks | 332 | 13 s | 0.26 GiB | 5.1% |
+
+Both runaway blocks stopped only on the 8192-token budget, and every token past the first few
+hundred was discarded by `RepetitionTruncator` immediately afterwards.
+
+### Stopping a decode that has fallen into a cycle
+
+`GenerationOptions.StopOnRepetition` (on by default; `--stop-on-repetition false` to disable) ends a
+block once its token stream is `RepetitionRepeats` verbatim copies of one period of at most
+`RepetitionMaximumPeriod` tokens, and only after `RepetitionMinimumTokens` have been generated.
+Greedy decoding makes the test exact rather than statistical: there is no sampling noise to see
+through, so a tail that has repeated six times is a cycle, not a coincidence.
+
+The thresholds sit well past what `truncate_repetitive_content` needs to fire — it acts on five
+repeats of an eight-character unit — so what is skipped would have been cut from the string anyway.
+The 384-token floor is what keeps ordinary blocks out of the check: their whole output is shorter
+than that, so they never reach it.
+
+Measured over the nine-page benchmark corpus, at defaults:
+
+| | before | after | |
+| --- | --- | --- | --- |
+| `equations.docx` p1 | 1,472 s | 123 s | 12.0x |
+| that page's tokens | 16,716 | 1,100 | 15.2x |
+| that page's allocations | 5.3 GiB | 445 MiB | 12.2x |
+| whole corpus (9 pages) | 2,123 s | 595 s | 3.6x |
+
+The page's three figures are one A/B in a single sitting, `--stop-on-repetition false` against the
+default; the corpus row is the earlier nine-page sweep, so its page-1 number (1,615 s) is a
+different day's measurement of the same run.
+
+Once the runaway blocks are gone that page is fifteen small blocks and 48% vision, which is the
+shape `--block-concurrency` was meant for: 123 s at the default 1, 95 s at 2, 84 s at 4, with
+byte-identical output. It stays at 1 by default because the win is a property of this shape — a
+page of few large blocks has no idle cores to fill — and the cost is holding several blocks'
+activations at once.
+
+#### Upstream has the same runaway, and no stop for it
+
+The early stop is a deliberate divergence, so it is worth being precise that what it skips is not
+something upstream keeps. Upstream cannot stop either, by construction:
+
+- PaddleX's local backend builds `generate_kwargs` out of **`max_new_tokens` and nothing else**
+  (`doc_vlm/predictor.py`); `repetition_penalty`, `temperature` and `top_p` are each warned about
+  and dropped. The server backends send a temperature and a token cap. The default budget is
+  `PADDLEOCR_VL_MAX_NEW_TOKENS = 8192`, which is where our own default comes from.
+- The checkpoint's `generation_config.json` sets only `eos_token_id`, `pad_token_id` and
+  `use_cache` — no `no_repeat_ngram_size`, no stopping criteria — and the model is a stock
+  `GenerationMixin`. Greedy decoding there ends on the stop token or on the budget.
+- `truncate_repetitive_content` exists precisely because of that: upstream generates the runaway
+  tail and then throws it away.
+
+Measured rather than inferred, with `tools/reference/probe_runaway_decode.py`, on the crop of the
+block that runs away — upstream's own checkpoint through `transformers`, greedy, no penalties:
+
+| | tokens | stopped on EOS | time |
+| --- | --- | --- | --- |
+| upstream, capped at 400 | 400 | no | 19 s |
+| upstream, at its own 8192 default | 8,192 | no | **525 s** |
+
+One block, nearly nine minutes, and the page has two of them. The output is `This is text.`
+repeated until the budget runs out, which is the same text this port produced before the stop.
+
+The two implementations then agree on what survives, which is what pins the divergence down to
+string length rather than to the port. Upstream's own `truncate_repetitive_content`, at the
+`min_count` its pipeline passes for a non-table block (50, and 5000 for a table — the values
+`RepetitionTruncator` uses), returns:
+
+| given | returns |
+| --- | --- |
+| upstream's 8,192-token output (28,671 chars) | `This is text.` ×3 |
+| this port's stopped 384-token output (1,343 chars) | `This is text.` ×1 |
+
+Both are upstream's function on the respective strings; the shorter one takes the
+shortest-repeating-unit branch instead of the suffix branch. So the port's pre-stop output matched
+upstream exactly, and its post-stop output is what upstream's own truncator makes of a shorter
+decode of the same cycle. Neither is the page's text — the source repeats that sentence
+thirty-one times and no decode of it terminated.
+
+**Eight of the nine pages come out byte-identical**, and the detector fired on exactly two blocks in
+the whole corpus — the two runaway ones. The ninth page differs only in how many copies of a
+sentence the source repeats thirty-one times survive: three before, one after. Both are the
+truncator's arbitrary reduction of a decode that never terminated, so neither is the page's text;
+what changed is which arbitrary reduction, because the truncator takes a different branch on a
+shorter string. On the corpus's character-accuracy metric that costs 0.4 points of mean, all of it
+on that one page.
+
 ### Where the vision tower's time goes
 
 `bench` prints a stage profile for the tower (`StageProfile`, the hand-written towers' answer to

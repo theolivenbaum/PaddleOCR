@@ -38,6 +38,12 @@ public static class Help
               --format markdown|json  Output format when writing to stdout
               --page-separator <text> Text between pages (default: a blank line)
               --block-concurrency <n> Blocks recognised in parallel (default: 1)
+              --max-new-tokens <n>    Token budget per block (default: 8192)
+              --stop-on-repetition <bool>
+                                      Stop a block once its output has fallen into a verbatim
+                                      cycle (default: true). The tokens this skips are the ones
+                                      the repetition truncator discards anyway.
+              --profile               Print per-block tokens, timings and allocations
 
             recognize options:
               --prompt-label <name>   ocr | table | formula | chart | seal | spotting  (default: ocr)
@@ -54,6 +60,7 @@ public static class Help
               --merge-tables          Rejoin tables split across a page break
               --title-levels          Set heading depth from the whole document
               --output <path>         Write the result to a file instead of stdout
+              --profile               Print tokens, timings and allocations for the call
 
             bench options:
               --width <n> --height <n>   Synthetic page size (default: 1024x1024)

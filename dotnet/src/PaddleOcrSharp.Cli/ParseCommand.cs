@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PaddleOcrSharp.Imaging;
+using PaddleOcrSharp.Models;
 using PaddleOcrSharp.Models.Layout;
 using PaddleOcrSharp.Pdf;
 using PaddleOcrSharp.Pipeline;
@@ -85,6 +86,12 @@ public static class ParseCommand
                 Nms = command.GetBool("layout-nms", LayoutOptions.Default.Nms),
             },
             BlockConcurrency = command.GetInt("block-concurrency", 1),
+            Profile = command.GetBool("profile", false) ? new RecognitionProfile() : null,
+            Generation = GenerationOptions.Default with
+            {
+                MaxNewTokens = command.GetInt("max-new-tokens", GenerationOptions.Default.MaxNewTokens),
+                StopOnRepetition = command.GetBool("stop-on-repetition", true),
+            },
             PixelBudgets = new BlockPixelBudgets
             {
                 MinPixels = command.GetInt("min-pixels", BlockPrompt.DefaultMinPixels),
@@ -101,6 +108,7 @@ public static class ParseCommand
         using DocumentParser parser = DocumentParser.Load(
             modelDirectory, layoutDirectory, orientationDirectory, unwarpingDirectory);
         Console.Error.WriteLine($"Models loaded in {clock.Elapsed.TotalSeconds:F1}s");
+        RecognitionProfile? profile = options.Profile;
 
         string? outputDirectory = command.Get("output-dir");
         if (outputDirectory is not null)
@@ -150,6 +158,12 @@ public static class ParseCommand
                     options.MarkdownSettings,
                     command.GetBool("format-block-content", false))
                 : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!));
+        }
+
+        if (profile is not null)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(profile.ToString());
         }
 
         return 0;
