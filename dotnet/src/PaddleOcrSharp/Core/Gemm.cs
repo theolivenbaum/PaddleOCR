@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PaddleOcrSharp.Core;
@@ -624,23 +625,38 @@ public static class Gemm
             d2.Clear();
             d3.Clear();
 
+            // References are taken once for the whole reduction. Re-slicing the right-hand row and
+            // calling out per term costs a span construction, a broadcast quad and a call for four
+            // multiply-adds of work, which is most of what this loop was spending: the reduction
+            // axis here is the token count, so it runs thousands of times for one small tile.
+            ref float aRef = ref MemoryMarshal.GetReference(a);
+            ref float bRef = ref MemoryMarshal.GetReference(b);
+            ref float dest0 = ref MemoryMarshal.GetReference(d0);
+            ref float dest1 = ref MemoryMarshal.GetReference(d1);
+            ref float dest2 = ref MemoryMarshal.GetReference(d2);
+            ref float dest3 = ref MemoryMarshal.GetReference(d3);
+
             int base0 = (row + i) * k;
 
             for (int p = 0; p < k; p++)
             {
-                float s0 = a[base0 + p];
-                float s1 = a[base0 + k + p];
-                float s2 = a[base0 + (2 * k) + p];
-                float s3 = a[base0 + (3 * k) + p];
+                float s0 = Unsafe.Add(ref aRef, base0 + p);
+                float s1 = Unsafe.Add(ref aRef, base0 + k + p);
+                float s2 = Unsafe.Add(ref aRef, base0 + (2 * k) + p);
+                float s3 = Unsafe.Add(ref aRef, base0 + (3 * k) + p);
 
                 // Masks and attention weights are genuinely sparse; skipping a whole quad of
-                // zeros is worth the four compares.
-                if ((s0, s1, s2, s3) == (0f, 0f, 0f, 0f))
+                // zeros is worth the four compares. Written out rather than as a tuple comparison,
+                // which does not reduce to four compares.
+                if (s0 == 0f && s1 == 0f && s2 == 0f && s3 == 0f)
                 {
                     continue;
                 }
 
-                Kernels.AddScaled4(d0, d1, d2, d3, b.Slice((p * n) + column, columns), s0, s1, s2, s3);
+                AccumulateQuad(
+                    ref Unsafe.Add(ref bRef, (p * n) + column),
+                    ref dest0, ref dest1, ref dest2, ref dest3,
+                    columns, s0, s1, s2, s3);
             }
         }
 
@@ -658,6 +674,60 @@ public static class Gemm
                     Kernels.AddScaled(destination, b.Slice((p * n) + column, columns), scale);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Adds one right-hand row, scaled four ways, into four destination rows.
+    /// </summary>
+    /// <remarks>
+    /// The reference-taking form of <see cref="Kernels.AddScaled4"/>, inlined into the reduction so
+    /// the caller pays neither a span construction nor a call per term.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateQuad(
+        ref float source,
+        ref float d0,
+        ref float d1,
+        ref float d2,
+        ref float d3,
+        int length,
+        float s0,
+        float s1,
+        float s2,
+        float s3)
+    {
+        int i = 0;
+
+        if (Simd.Use256 && length >= Vector256<float>.Count)
+        {
+            Vector256<float> v0 = Vector256.Create(s0);
+            Vector256<float> v1 = Vector256.Create(s1);
+            Vector256<float> v2 = Vector256.Create(s2);
+            Vector256<float> v3 = Vector256.Create(s3);
+
+            for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
+            {
+                var offset = (nuint)i;
+                Vector256<float> x = Vector256.LoadUnsafe(ref source, offset);
+                Vector256.FusedMultiplyAdd(x, v0, Vector256.LoadUnsafe(ref d0, offset))
+                    .StoreUnsafe(ref d0, offset);
+                Vector256.FusedMultiplyAdd(x, v1, Vector256.LoadUnsafe(ref d1, offset))
+                    .StoreUnsafe(ref d1, offset);
+                Vector256.FusedMultiplyAdd(x, v2, Vector256.LoadUnsafe(ref d2, offset))
+                    .StoreUnsafe(ref d2, offset);
+                Vector256.FusedMultiplyAdd(x, v3, Vector256.LoadUnsafe(ref d3, offset))
+                    .StoreUnsafe(ref d3, offset);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            float x = Unsafe.Add(ref source, i);
+            Unsafe.Add(ref d0, i) += x * s0;
+            Unsafe.Add(ref d1, i) += x * s1;
+            Unsafe.Add(ref d2, i) += x * s2;
+            Unsafe.Add(ref d3, i) += x * s3;
         }
     }
 

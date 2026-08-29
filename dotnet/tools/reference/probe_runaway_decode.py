@@ -17,14 +17,21 @@ So greedy decoding here stops on the end-of-sequence token or on the budget, and
 Usage:
 
     python3 probe_runaway_decode.py <image> [max_new_tokens] [--prompt "OCR:"] [--box l,t,r,b]
+    python3 probe_runaway_decode.py <image> [max_new_tokens] --blocks page.json
 
 It prints whether generation stopped on the stop token or ran to the cap, and writes the decoded
 text beside the image. A run that ends "stopped on EOS: False" is the failure this is looking for.
+
+`--blocks` takes the JSON `paddleocr-sharp parse --format json` writes and runs every block of the
+page, each with the instruction its label earns, so upstream's whole recognition stage can be timed
+against the port's. Both sides then see the same blocks; layout detection and markdown assembly are
+excluded from the comparison, which is fair because neither is where the time goes.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -43,12 +50,22 @@ UPSTREAM_MAX_NEW_TOKENS = 8192
 DEFAULT_PROMPT = "OCR:"
 
 
+def prompt_for(label: str) -> str:
+    """The instruction a block's label earns, as `BlockPrompt.For` ports it from pipeline.py."""
+    if label == "table":
+        return "Table Recognition:"
+    if "formula" in label and label != "formula_number":
+        return "Formula Recognition:"
+    return DEFAULT_PROMPT
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image")
     parser.add_argument("max_new_tokens", nargs="?", type=int, default=UPSTREAM_MAX_NEW_TOKENS)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--box", help="crop as left,top,right,bottom in page pixels")
+    parser.add_argument("--blocks", help="a `parse --format json` result; runs every block of it")
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 4)
     parser.add_argument(
         "--model",
@@ -56,10 +73,18 @@ def main() -> int:
         help="checkpoint directory, or a Hugging Face repo id")
     args = parser.parse_args()
 
-    image = Image.open(args.image).convert("RGB")
-    if args.box:
-        image = image.crop(tuple(int(v) for v in args.box.split(",")))
-    print(f"crop {image.width}x{image.height}", flush=True)
+    page = Image.open(args.image).convert("RGB")
+
+    if args.blocks:
+        with open(args.blocks) as handle:
+            pages = json.load(handle)
+        crops = [(block["label"], prompt_for(block["label"]), page.crop(tuple(block["bbox"])))
+                 for block in pages[0]["blocks"]]
+        print(f"{len(crops)} blocks", flush=True)
+    else:
+        crop = page.crop(tuple(int(v) for v in args.box.split(","))) if args.box else page
+        crops = [("", args.prompt, crop)]
+        print(f"crop {crop.width}x{crop.height}", flush=True)
 
     torch.set_num_threads(args.threads)
 
@@ -67,42 +92,56 @@ def main() -> int:
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, trust_remote_code=True, torch_dtype=torch.float32).eval()
-    print(f"loaded in {time.time() - started:.0f}s", flush=True)
+    print(f"loaded in {time.time() - started:.0f}s (excluded from the totals below)", flush=True)
 
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": args.prompt}]}]
-    chat = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = processor(images=[image], text=[chat], return_tensors="pt")
-
-    prompt_tokens = inputs["input_ids"].shape[1]
     eos = model.generation_config.eos_token_id
-    print(f"prompt tokens: {prompt_tokens}, eos_token_id: {eos}", flush=True)
+    results = []
+    page_started = time.time()
 
-    started = time.time()
-    with torch.inference_mode():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,       # the local backend is greedy and drops the sampling knobs
-            use_cache=True,
-        )
-    elapsed = time.time() - started
+    for index, (label, instruction, crop) in enumerate(crops):
+        messages = [{"role": "user",
+                     "content": [{"type": "image"}, {"type": "text", "text": instruction}]}]
+        chat = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(images=[crop], text=[chat], return_tensors="pt")
+        prompt_tokens = inputs["input_ids"].shape[1]
 
-    generated = output[0][prompt_tokens:]
-    count = len(generated)
-    hit_eos = bool((generated == eos).any())
+        started = time.time()
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=False,   # the local backend is greedy and drops the sampling knobs
+                use_cache=True,
+            )
+        elapsed = time.time() - started
 
-    print(f"\ngenerated {count} tokens in {elapsed:.0f}s "
-          f"({elapsed / max(1, count) * 1000:.0f} ms/token)")
-    print(f"stopped on EOS: {hit_eos}   ran to the {args.max_new_tokens}-token cap: {not hit_eos}")
+        generated = output[0][prompt_tokens:]
+        hit_eos = bool((generated == eos).any())
+        decoded = processor.tokenizer.decode(generated, skip_special_tokens=True)
 
-    decoded = processor.tokenizer.decode(generated, skip_special_tokens=True)
-    destination = os.path.splitext(args.image)[0] + ".upstream.txt"
+        results.append({"index": index, "label": label, "prompt_tokens": prompt_tokens,
+                        "generated": len(generated), "stopped_on_eos": hit_eos,
+                        "seconds": elapsed, "text": decoded})
+
+        ran_on = "" if hit_eos else f"   !! ran to the {args.max_new_tokens}-token cap"
+        print(f"[{index:2d}] {label or 'crop':16} prompt={prompt_tokens:4d} "
+              f"gen={len(generated):5d} {elapsed:7.1f}s "
+              f"({elapsed / max(1, len(generated)) * 1000:.0f} ms/token){ran_on}", flush=True)
+
+    total = time.time() - page_started
+    runaway = [r for r in results if not r["stopped_on_eos"]]
+
+    print(f"\n{len(results)} block(s) in {total:.0f}s, {sum(r['generated'] for r in results)} tokens")
+    if runaway:
+        spent = sum(r["seconds"] for r in runaway)
+        print(f"{len(runaway)} never stopped: {spent:.0f}s, {spent / total * 100:.0f}% of the total")
+    else:
+        print("every block stopped on the stop token")
+
+    destination = os.path.splitext(args.image)[0] + ".upstream.json"
     with open(destination, "w") as handle:
-        handle.write(decoded)
-
-    print(f"{len(decoded)} chars -> {destination}")
-    print(f"head: {decoded[:160]!r}")
-    print(f"tail: {decoded[-160:]!r}")
+        json.dump(results, handle, indent=1)
+    print(f"-> {destination}")
     return 0
 
 

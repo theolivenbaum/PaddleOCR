@@ -1,5 +1,6 @@
 using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PaddleOcrSharp.Core;
@@ -39,6 +40,18 @@ public static class Kernels
         int length = source.Length;
         int i = 0;
 
+        // Indexing the five spans would bounds-check every access: one for the source and two for
+        // each destination, so nine compares for four multiply-adds. That is the whole cost of this
+        // loop - it is the inner kernel of attention's value product, which reduces over the token
+        // axis and so calls this once per key with only four multiply-adds of work to amortise
+        // them. Taking one reference per span up front and stepping it leaves the same arithmetic
+        // in the same order, so the result is bit-identical.
+        ref float source0 = ref MemoryMarshal.GetReference(source);
+        ref float dest0 = ref MemoryMarshal.GetReference(d0);
+        ref float dest1 = ref MemoryMarshal.GetReference(d1);
+        ref float dest2 = ref MemoryMarshal.GetReference(d2);
+        ref float dest3 = ref MemoryMarshal.GetReference(d3);
+
         if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> v0 = Vector256.Create(s0);
@@ -48,21 +61,26 @@ public static class Kernels
 
             for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
             {
-                Vector256<float> x = Vector256.LoadUnsafe(in source[i]);
-                Vector256.FusedMultiplyAdd(x, v0, Vector256.LoadUnsafe(in d0[i])).StoreUnsafe(ref d0[i]);
-                Vector256.FusedMultiplyAdd(x, v1, Vector256.LoadUnsafe(in d1[i])).StoreUnsafe(ref d1[i]);
-                Vector256.FusedMultiplyAdd(x, v2, Vector256.LoadUnsafe(in d2[i])).StoreUnsafe(ref d2[i]);
-                Vector256.FusedMultiplyAdd(x, v3, Vector256.LoadUnsafe(in d3[i])).StoreUnsafe(ref d3[i]);
+                var offset = (nuint)i;
+                Vector256<float> x = Vector256.LoadUnsafe(ref source0, offset);
+                Vector256.FusedMultiplyAdd(x, v0, Vector256.LoadUnsafe(ref dest0, offset))
+                    .StoreUnsafe(ref dest0, offset);
+                Vector256.FusedMultiplyAdd(x, v1, Vector256.LoadUnsafe(ref dest1, offset))
+                    .StoreUnsafe(ref dest1, offset);
+                Vector256.FusedMultiplyAdd(x, v2, Vector256.LoadUnsafe(ref dest2, offset))
+                    .StoreUnsafe(ref dest2, offset);
+                Vector256.FusedMultiplyAdd(x, v3, Vector256.LoadUnsafe(ref dest3, offset))
+                    .StoreUnsafe(ref dest3, offset);
             }
         }
 
         for (; i < length; i++)
         {
-            float x = source[i];
-            d0[i] += x * s0;
-            d1[i] += x * s1;
-            d2[i] += x * s2;
-            d3[i] += x * s3;
+            float x = Unsafe.Add(ref source0, i);
+            Unsafe.Add(ref dest0, i) += x * s0;
+            Unsafe.Add(ref dest1, i) += x * s1;
+            Unsafe.Add(ref dest2, i) += x * s2;
+            Unsafe.Add(ref dest3, i) += x * s3;
         }
     }
 
@@ -72,20 +90,26 @@ public static class Kernels
         int length = destination.Length;
         int i = 0;
 
+        // Same reason as AddScaled4: the indexing, not the arithmetic, is what this loop spends.
+        ref float source0 = ref MemoryMarshal.GetReference(source);
+        ref float dest0 = ref MemoryMarshal.GetReference(destination);
+
         if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> scaleVector = Vector256.Create(scale);
             for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
             {
-                Vector256<float> acc = Vector256.FusedMultiplyAdd(
-                    Vector256.LoadUnsafe(in source[i]), scaleVector, Vector256.LoadUnsafe(in destination[i]));
-                acc.StoreUnsafe(ref destination[i]);
+                var offset = (nuint)i;
+                Vector256.FusedMultiplyAdd(
+                    Vector256.LoadUnsafe(ref source0, offset),
+                    scaleVector,
+                    Vector256.LoadUnsafe(ref dest0, offset)).StoreUnsafe(ref dest0, offset);
             }
         }
 
         for (; i < length; i++)
         {
-            destination[i] += source[i] * scale;
+            Unsafe.Add(ref dest0, i) += Unsafe.Add(ref source0, i) * scale;
         }
     }
 

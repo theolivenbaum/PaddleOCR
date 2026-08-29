@@ -326,8 +326,26 @@ block that runs away — upstream's own checkpoint through `transformers`, greed
 | upstream, capped at 400 | 400 | no | 19 s |
 | upstream, at its own 8192 default | 8,192 | no | **525 s** |
 
-One block, nearly nine minutes, and the page has two of them. The output is `This is text.`
-repeated until the budget runs out, which is the same text this port produced before the stop.
+One block, nearly nine minutes. Running upstream over **every** block of that page the same way
+(`--blocks`, the port's layout boxes so both sides see the same fifteen blocks) puts a number on
+the whole stage:
+
+| | blocks | tokens | recognition |
+| --- | --- | --- | --- |
+| upstream, through `transformers` | 15 | 16,741 | **1,479 s** |
+| this port, before the stop | 15 | 16,716 | 1,462 s |
+| this port, after the stop | 15 | 1,100 | 118 s |
+
+Two of upstream's fifteen blocks never stopped and took 1,428 s of that 1,479 s — 97%. The two
+sides agree to within 1.2% on time and 25 tokens before the stop, which is the fidelity check that
+makes the third row meaningful: after it, the port does the same page's recognition **12x faster
+than the original**, and the difference is entirely tokens not generated.
+
+Layout detection and markdown assembly are outside that comparison; on the port's side they are
+about 10 s, so including them would not move it. The port's rows are its profile's vision + prefill
++ decode; upstream's is wall time around `generate` with the model already loaded. The output is
+`This is text.` repeated until the budget runs out, which is the same text this port produced
+before the stop.
 
 The two implementations then agree on what survives, which is what pins the divergence down to
 string length rather than to the port. Upstream's own `truncate_repetitive_content`, at the
@@ -358,23 +376,62 @@ on that one page.
 `bench` prints a stage profile for the tower (`StageProfile`, the hand-written towers' answer to
 `PirProfile`). For the same 980x392 page:
 
-| Stage | Share |
-| --- | --- |
-| attention | 44% |
-| MLP matrix products | 32% |
-| QKV projections | 13% |
-| output projection | 4% |
-| rotary + head shuffles, GELU, norms, residuals | 7% |
+| Stage | Share | GFLOP/s |
+| --- | --- | --- |
+| attention | 36% | 60 |
+| MLP matrix products | 37% | 130 |
+| QKV projections | 15% | 121 |
+| output projection | 5% | 122 |
+| rotary + head shuffles, GELU, norms, residuals | 7% | |
 
-Attention carries under a quarter of the tower's arithmetic and takes nearly half its time: about
-65 GFLOP/s against the 196 the large matrix products reach. That is the one place left where the
-gap to the hardware is structural rather than incremental — the score product has an inner
-dimension of 72, which is too short for a kernel that reduces along it. A flash-attention-shaped
-rewrite, tiling over keys with a running maximum, is the way in.
+The rate column is what makes attention's share legible: it carries under a quarter of the tower's
+arithmetic, and until the change below it ran at 50 GFLOP/s where every other product in the same
+run reached 120-130, against a machine ceiling of 227 across four threads.
 
-It is not, however, key and value traffic, which was the first guess: every row-block re-reads
-this head's keys and values, 123 times over at the sixteen-row block used, and sizing the block
-from the token count instead so that halved made no measurable difference.
+Attention carries under a quarter of the tower's arithmetic and takes nearly half its time. Its two
+products and the softmax between them can be timed separately, one thread per head, at the shape
+the tower issues (16 query rows against 1960 tokens, head dimension 72):
+
+| | one thread | four threads | share of attention |
+| --- | --- | --- | --- |
+| score product (`Q·Kᵀ`) | 18.4 GF/s | 58 GF/s | 40% |
+| value product (`P·V`) | 17.8 GF/s | 52 GF/s | 52% |
+| scale + softmax | | | 8% |
+
+Three things that says, none of them the first guess:
+
+- **The value product is the larger half**, not the score product. Both carry identical FLOPs, so
+  the split is entirely kernel efficiency.
+- **The softmax is 8%**, so its four passes over each score row are not where to look.
+- **Parallel scaling is fine** — about 3x on four threads, against the 2.53x the machine's own FMA
+  measurement scales by. The gap is single-thread kernel efficiency against an 89.6 GF/s ceiling,
+  not threading.
+
+What the score product spends is the **horizontal sum**, one per output element. Reducing along the
+head's 72 columns is nine multiply-adds followed by a ~10-cycle lane reduction, and that ratio is
+fixed no matter how the tile is shaped: `Dot4` finishes four outputs with four lane reductions per
+36 multiply-adds, `Dot4x4` sixteen with sixteen per 144 — the same 0.111 either way, which is why
+substituting one for the other changes nothing at all. Getting past it means not reducing along the
+lanes: hold the keys transposed, `[headDim][tokens]`, so the lanes are output columns and the
+reduction is an ordinary accumulation. In the isolated kernel benchmark that is **18.4 → 25
+GF/s** — and in the tower it is worth nothing at all, which is recorded below.
+
+What the value product spent was **indexing**. Its inner kernel accumulates one scaled right-hand
+row into four destination rows, so five spans are indexed per iteration — one source and two per
+destination — which is nine bounds compares for four multiply-adds, and the reduction axis is the
+token count, so it runs thousands of times for one 16x72 tile. Taking a reference per span once and
+stepping it, with the accumulate inlined into the reduction so the loop pays neither a span
+construction nor a call per term, is **17.8 GF/s against 14.2**, and byte-for-byte the same
+arithmetic in the same order. Measured on the tower: **attention 9,462 ms → 7,948 ms (−16%)** and
+the whole tower 23,636 ms → 21,954 ms, with the untouched stages inside their ±3% noise as the
+control and four pages byte-identical.
+
+Key and value traffic is not the limit, which was the first guess and has now been ruled out three
+separate ways: every row-block re-reads this head's keys and values 123 times over at the
+sixteen-row block used, and sizing the block from the token count so that halves made no measurable
+difference; nor did hoisting the reduction outermost so the value matrix is read once per block
+rather than once per row group; nor did holding the output tile in registers, which cost 15% by
+breaking the single streaming pass over that matrix.
 
 ### Things that looked like wins and were not
 
@@ -390,7 +447,28 @@ the argument for them is still convincing on paper, and someone will otherwise t
   powers of two, so the prefetcher was already handling them.
 - **Sizing attention's row-block from the token count**, so a page's keys and values are read
   half as many times. No measurable change, which is what rules key and value bandwidth out as
-  attention's limit and points at the score product's short inner dimension instead.
+  attention's limit.
+- **Giving attention's score product the four-by-four tile `Gemm.Linear` uses.** The argument is
+  that `Dot4` issues five loads per four multiply-adds where `Dot4x4` issues eight per sixteen, so
+  the wider tile should be load-bound where the narrow one is not. Exactly neutral, and the reason
+  is worth keeping: both finish every output with a lane reduction, and over a 72-long inner
+  dimension that reduction is the cost, at an identical 0.111 per multiply-add in both shapes.
+- **Hoisting attention's value reduction outermost**, so the head's value matrix is read once per
+  block instead of once per group of four rows — a fourfold cut in what looked like 20 GB/s of
+  traffic. Neutral, because that traffic is served from L2 and L3, which are nowhere near their
+  measured 51 and 22 GB/s.
+- **Holding the value product's output tile in registers**, four rows by sixteen columns. A 15%
+  loss: covering 64 columns then takes four passes over the value matrix, each touching a quarter
+  of every row, which trades one streaming pass for four strided ones.
+- **Transposing each head's keys so the score product never reduces along the vector lanes.** The
+  argument is the one above and it is sound: the isolated kernel goes from 18.4 to 25 GF/s with the
+  lane reduction gone. In the tower it measured 7,955 ms against 7,948 ms — neutral to the last
+  digit — for a per-head 564 KB buffer, a transpose of every head's keys on every layer, and a
+  second kernel to maintain. Reverted. Worth adding to the microbenchmark traps below: the harness
+  timed the kernel but not the transpose that feeds it, and ran it over the whole token axis in one
+  go where `Gemm.MatMul` tiles the columns at 455. A kernel benchmark that does not pay the
+  preparation its caller pays, in the tile its caller uses, will happily promise a win the caller
+  cannot collect.
 - **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
   60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
   GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit
