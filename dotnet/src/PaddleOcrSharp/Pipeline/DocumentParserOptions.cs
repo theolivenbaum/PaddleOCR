@@ -82,6 +82,14 @@ public sealed record DocumentParserOptions
     /// </remarks>
     public string WholePageLabel { get; init; } = "text";
 
+    /// <summary>Optional collector for what each block's recognition cost.</summary>
+    /// <remarks>
+    /// Off by default. When set, every block adds a <see cref="RecognitionRecord"/> saying how many
+    /// tokens it generated and where its time went, which is the only way to see that one runaway
+    /// block outweighs the rest of the page.
+    /// </remarks>
+    public RecognitionProfile? Profile { get; init; }
+
     /// <summary>Number of blocks recognised concurrently.</summary>
     /// <remarks>
     /// The model's own kernels already use every core, so blocks are recognised one at a time by

@@ -368,7 +368,7 @@ public sealed class DocumentParser : IDisposable
 
         VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label, options.PixelBudgets);
         string raw = _model.Recognize(
-            prepared, instruction, preprocessing, generation, cancellationToken);
+            prepared, instruction, preprocessing, generation, options.Profile, region.Label, cancellationToken);
 
         string content = RepetitionTruncator.Truncate(
             raw,

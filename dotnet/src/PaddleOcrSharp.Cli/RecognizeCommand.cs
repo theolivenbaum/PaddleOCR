@@ -70,8 +70,15 @@ public static class RecognizeCommand
 
         using RgbImage image = ImageIO.Load(imagePath);
         clock.Restart();
-        string text = model.Recognize(image, instruction, preprocessing, generation, cancellation.Token);
+        RecognitionProfile? profile = command.GetBool("profile", false) ? new RecognitionProfile() : null;
+        string text = model.Recognize(
+            image, instruction, preprocessing, generation, profile, null, cancellation.Token);
         TimeSpan inference = clock.Elapsed;
+
+        if (profile is not null)
+        {
+            Console.Error.WriteLine(profile.ToString());
+        }
 
         string? output = command.Get("output");
         if (output is not null)
