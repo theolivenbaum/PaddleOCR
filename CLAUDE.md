@@ -297,6 +297,12 @@ The page's three figures are one A/B in a single sitting, `--stop-on-repetition 
 default; the corpus row is the earlier nine-page sweep, so its page-1 number (1,615 s) is a
 different day's measurement of the same run.
 
+Once the runaway blocks are gone that page is fifteen small blocks and 48% vision, which is the
+shape `--block-concurrency` was meant for: 123 s at the default 1, 95 s at 2, 84 s at 4, with
+byte-identical output. It stays at 1 by default because the win is a property of this shape — a
+page of few large blocks has no idle cores to fill — and the cost is holding several blocks'
+activations at once.
+
 **Eight of the nine pages come out byte-identical**, and the detector fired on exactly two blocks in
 the whole corpus — the two runaway ones. The ninth page differs only in how many copies of a
 sentence the source repeats thirty-one times survive: three before, one after. Both are the
