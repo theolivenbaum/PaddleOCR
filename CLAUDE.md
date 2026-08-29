@@ -252,8 +252,12 @@ how much it says rather than by how big it is.
 Decoding is bandwidth-bound on weight streaming, which is what makes that so. Every generated token
 re-reads the 18 decoder layers (255M parameters) and the untied `lm_head` (106M), so **721 MB of
 bf16 weights per token** before the key/value cache is counted — and the cache adds another 302 MB
-per token once the context reaches 8k. That is why the output head is a steady 18-20% of decode and
-not worth attacking: greedy selection needs every logit, so its 212 MB is irreducible.
+per token once the context reaches 8k. The profile shows both halves of that directly: a block
+decoding a few dozen tokens runs at ~40 ms/token with the output head taking 19-20% of decode,
+while a block that reached 8k runs at ~85 ms/token with the head down to 9% — same weights, same
+head, twice the cost, because the cache it re-reads has grown past the weights themselves. The head
+is not worth attacking either way: greedy selection needs every logit, so its 212 MB is
+irreducible.
 
 The consequence is that a decoder which stops converging is not a quality problem with a
 performance footnote, it is the performance problem. Measured on `equations.docx` page 1, fifteen
@@ -261,8 +265,8 @@ blocks, before the early stop below:
 
 | | tokens | decode | allocated | share of page |
 | --- | --- | --- | --- | --- |
-| two runaway `text` blocks | 16,384 | 1,386 s | 6.0 GiB | 92.6% |
-| the other thirteen blocks | 332 | 16 s | 0.2 GiB | 7.4% |
+| two runaway `text` blocks | 16,384 | 1,379 s | 5.1 GiB | 94.9% |
+| the other thirteen blocks | 332 | 13 s | 0.26 GiB | 5.1% |
 
 Both runaway blocks stopped only on the 8192-token budget, and every token past the first few
 hundred was discarded by `RepetitionTruncator` immediately afterwards.
@@ -284,10 +288,14 @@ Measured over the nine-page benchmark corpus, at defaults:
 
 | | before | after | |
 | --- | --- | --- | --- |
-| `equations.docx` p1 | 1,615 s | 121 s | 13.3x |
+| `equations.docx` p1 | 1,472 s | 123 s | 12.0x |
+| that page's tokens | 16,716 | 1,100 | 15.2x |
+| that page's allocations | 5.3 GiB | 445 MiB | 12.2x |
 | whole corpus (9 pages) | 2,123 s | 595 s | 3.6x |
-| that page's tokens | 16,716 | 1,100 | |
-| that page's allocations | 6.2 GiB | 350 MiB | |
+
+The page's three figures are one A/B in a single sitting, `--stop-on-repetition false` against the
+default; the corpus row is the earlier nine-page sweep, so its page-1 number (1,615 s) is a
+different day's measurement of the same run.
 
 **Eight of the nine pages come out byte-identical**, and the detector fired on exactly two blocks in
 the whole corpus — the two runaway ones. The ninth page differs only in how many copies of a
