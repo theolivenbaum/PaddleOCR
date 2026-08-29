@@ -326,8 +326,26 @@ block that runs away — upstream's own checkpoint through `transformers`, greed
 | upstream, capped at 400 | 400 | no | 19 s |
 | upstream, at its own 8192 default | 8,192 | no | **525 s** |
 
-One block, nearly nine minutes, and the page has two of them. The output is `This is text.`
-repeated until the budget runs out, which is the same text this port produced before the stop.
+One block, nearly nine minutes. Running upstream over **every** block of that page the same way
+(`--blocks`, the port's layout boxes so both sides see the same fifteen blocks) puts a number on
+the whole stage:
+
+| | blocks | tokens | recognition |
+| --- | --- | --- | --- |
+| upstream, through `transformers` | 15 | 16,741 | **1,479 s** |
+| this port, before the stop | 15 | 16,716 | 1,462 s |
+| this port, after the stop | 15 | 1,100 | 118 s |
+
+Two of upstream's fifteen blocks never stopped and took 1,428 s of that 1,479 s — 97%. The two
+sides agree to within 1.2% on time and 25 tokens before the stop, which is the fidelity check that
+makes the third row meaningful: after it, the port does the same page's recognition **12x faster
+than the original**, and the difference is entirely tokens not generated.
+
+Layout detection and markdown assembly are outside that comparison; on the port's side they are
+about 10 s, so including them would not move it. The port's rows are its profile's vision + prefill
++ decode; upstream's is wall time around `generate` with the model already loaded. The output is
+`This is text.` repeated until the budget runs out, which is the same text this port produced
+before the stop.
 
 The two implementations then agree on what survives, which is what pins the divergence down to
 string length rather than to the port. Upstream's own `truncate_repetitive_content`, at the
