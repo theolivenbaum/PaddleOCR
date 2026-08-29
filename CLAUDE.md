@@ -413,9 +413,8 @@ fixed no matter how the tile is shaped: `Dot4` finishes four outputs with four l
 36 multiply-adds, `Dot4x4` sixteen with sixteen per 144 — the same 0.111 either way, which is why
 substituting one for the other changes nothing at all. Getting past it means not reducing along the
 lanes: hold the keys transposed, `[headDim][tokens]`, so the lanes are output columns and the
-reduction is an ordinary accumulation. Prototyped, that is **18.4 → 25 GF/s**, and it is the next
-thing to do here. It is not free — it needs a transposed key buffer per head, and the summation
-order changes, so the scores move by ~1e-6 absolute.
+reduction is an ordinary accumulation. In the isolated kernel benchmark that is **18.4 → 25
+GF/s** — and in the tower it is worth nothing at all, which is recorded below.
 
 What the value product spent was **indexing**. Its inner kernel accumulates one scaled right-hand
 row into four destination rows, so five spans are indexed per iteration — one source and two per
@@ -461,6 +460,15 @@ the argument for them is still convincing on paper, and someone will otherwise t
 - **Holding the value product's output tile in registers**, four rows by sixteen columns. A 15%
   loss: covering 64 columns then takes four passes over the value matrix, each touching a quarter
   of every row, which trades one streaming pass for four strided ones.
+- **Transposing each head's keys so the score product never reduces along the vector lanes.** The
+  argument is the one above and it is sound: the isolated kernel goes from 18.4 to 25 GF/s with the
+  lane reduction gone. In the tower it measured 7,955 ms against 7,948 ms — neutral to the last
+  digit — for a per-head 564 KB buffer, a transpose of every head's keys on every layer, and a
+  second kernel to maintain. Reverted. Worth adding to the microbenchmark traps below: the harness
+  timed the kernel but not the transpose that feeds it, and ran it over the whole token axis in one
+  go where `Gemm.MatMul` tiles the columns at 455. A kernel benchmark that does not pay the
+  preparation its caller pays, in the tile its caller uses, will happily promise a win the caller
+  cannot collect.
 - **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
   60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
   GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit
