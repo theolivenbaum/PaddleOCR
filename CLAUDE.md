@@ -121,7 +121,7 @@ dotnet/
       Models/Paddle/           # Paddle PIR graph interpreter and its operator kernels
       Models/Preprocessing/    # orientation classifier, UVDoc unwarping
       Pipeline/                # orchestration, block prompts, markdown/OTSL assembly
-      Download/                # model downloader (Hugging Face / BOS mirrors)
+      Download/                # model downloader (static HTTP mirror)
     PaddleOcrSharp.Pdf/        # PDF page rasterisation (the one native dependency)
     PaddleOcrSharp.Cli/        # `paddleocr-sharp` command-line front-end
   tests/

@@ -53,7 +53,7 @@ public static class DownloadCommand
         foreach (ModelDescriptor model in models.Distinct())
         {
             Console.WriteLine();
-            Console.WriteLine($"{model.Name} ({model.Repository}@{model.Revision})");
+            Console.WriteLine($"{model.Name} ({model.RemotePath}/)");
 
             var reporter = new ConsoleProgress();
             try

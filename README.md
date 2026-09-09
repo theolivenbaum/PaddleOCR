@@ -54,8 +54,8 @@ paddleocr-sharp bench                                 # measure the machine, the
    trimmed, and the page is rendered as markdown and JSON.
 
 Models are fetched on demand into `~/.cache/paddleocr-sharp`; `--model-dir` and `--layout-dir`
-point the loaders at directories you manage yourself, and `HF_ENDPOINT` redirects the downloader
-at a mirror. `paddleocr-sharp` with no arguments prints every option.
+point the loaders at directories you manage yourself, and `PADDLEOCR_SHARP_MODELS_URL` redirects
+the downloader at another mirror. `paddleocr-sharp` with no arguments prints every option.
 
 ## As a library
 
