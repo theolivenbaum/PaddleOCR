@@ -31,6 +31,9 @@ public sealed class ModelDownloader : IDisposable
     private readonly HttpClient _client;
     private readonly bool _ownsClient;
 
+    // Set once a mirror answers 405 to a HEAD; it will answer 405 to every other one too.
+    private volatile bool _headUnsupported;
+
     /// <summary>Creates a downloader with its own <see cref="HttpClient"/>.</summary>
     /// <param name="cacheRoot">Cache directory; defaults to the user cache.</param>
     /// <param name="endpoint">
@@ -113,7 +116,7 @@ public sealed class ModelDownloader : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
 
         string url = $"{Endpoint}/{model.RemotePath}/{file.Path}";
-        RemoteFileInfo? remote = await HeadAsync(url, cancellationToken).ConfigureAwait(false);
+        RemoteFileInfo? remote = await ProbeAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (File.Exists(target))
         {
@@ -135,11 +138,24 @@ public sealed class ModelDownloader : IDisposable
         }
 
         string partial = target + ".part";
+        string validatorFile = partial + ".etag";
+        string? validator = remote.Value.Validator?.Tag;
+
         long offset = File.Exists(partial) ? new FileInfo(partial).Length : 0;
         if (offset > 0 && remote.Value.Length is { } total && (offset > total || !remote.Value.SupportsRange))
         {
-            File.Delete(partial);
             offset = 0;
+        }
+
+        if (offset > 0 && !ResumeIsSafe(validatorFile, validator))
+        {
+            offset = 0;
+        }
+
+        if (offset == 0)
+        {
+            File.Delete(partial);
+            File.Delete(validatorFile);
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -147,14 +163,21 @@ public sealed class ModelDownloader : IDisposable
         {
             request.Headers.Range = new RangeHeaderValue(offset, null);
 
-            // If the mirror's copy changed since the .part was written, appending to it would
-            // splice two different files into one of exactly the right length — which the size
-            // check below cannot see. If-Range makes the server answer 200 with the whole body
-            // instead, and the stale partial content is discarded a few lines down.
-            if (remote.Value.Validator is { } validator)
+            // This validator is the one just probed, so a server that honours the header will
+            // almost always find it current and answer 206. What it buys is the narrow race
+            // where the file changes between the probe and this request; a partial file left by
+            // an earlier run is the recorded validator's job, not this header's.
+            if (remote.Value.Validator is { } tag)
             {
-                request.Headers.IfRange = new RangeConditionHeaderValue(validator);
+                request.Headers.IfRange = new RangeConditionHeaderValue(tag);
             }
+        }
+
+        if (validator is not null)
+        {
+            // Written before the transfer, so an interrupted one leaves a partial file that can
+            // still be matched against the mirror on the next run.
+            await File.WriteAllTextAsync(validatorFile, validator, cancellationToken).ConfigureAwait(false);
         }
 
         using HttpResponseMessage response = await _client
@@ -202,41 +225,105 @@ public sealed class ModelDownloader : IDisposable
         }
 
         File.Move(partial, target, overwrite: true);
+        File.Delete(validatorFile);
     }
 
-    private async Task<RemoteFileInfo?> HeadAsync(string url, CancellationToken cancellationToken)
+    /// <summary>
+    /// Whether a <c>.part</c> file may be appended to rather than started over.
+    /// </summary>
+    /// <remarks>
+    /// Appending to a partial copy of a file that has since changed splices two files into one of
+    /// exactly the length the server reports, so neither the length check nor a resumed transfer
+    /// can detect it. <c>If-Range</c> does not help: the validator it would carry is the one just
+    /// probed, which is current by construction, and models.curiosity.ai ignores the header
+    /// anyway. So the validator in force when the partial file was started is recorded beside it
+    /// and compared here. A mirror that publishes no usable validator cannot be checked at all,
+    /// and its partial file is discarded rather than trusted.
+    /// </remarks>
+    private static bool ResumeIsSafe(string validatorFile, string? validator)
+    {
+        if (validator is null || !File.Exists(validatorFile))
+        {
+            return false;
+        }
+
+        return File.ReadAllText(validatorFile).Trim() == validator;
+    }
+
+    /// <summary>
+    /// Reads a file's length, validator and range support without transferring it.
+    /// </summary>
+    /// <remarks>
+    /// HEAD is the cheap way to ask, but a mirror is entitled to refuse it — the R2 bucket behind
+    /// models.curiosity.ai answers <c>405</c> with <c>Allow: PUT, GET, DELETE</c>. A one-byte
+    /// ranged GET is the fallback: its <c>Content-Range</c> carries the full length, and a
+    /// <c>206</c> proves range support outright rather than promising it in a header.
+    /// </remarks>
+    private async Task<RemoteFileInfo?> ProbeAsync(string url, CancellationToken cancellationToken)
+    {
+        if (!_headUnsupported)
+        {
+            MetadataProbe head = await RequestMetadataAsync(url, HttpMethod.Head, cancellationToken)
+                .ConfigureAwait(false);
+            if (head.Info is { } info)
+            {
+                return info;
+            }
+
+            _headUnsupported = head.MethodRejected;
+        }
+
+        MetadataProbe ranged = await RequestMetadataAsync(url, HttpMethod.Get, cancellationToken)
+            .ConfigureAwait(false);
+        return ranged.Info;
+    }
+
+    private async Task<MetadataProbe> RequestMetadataAsync(
+        string url,
+        HttpMethod method,
+        CancellationToken cancellationToken)
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Head, url);
+            using var request = new HttpRequestMessage(method, url);
+            if (method == HttpMethod.Get)
+            {
+                request.Headers.Range = new RangeHeaderValue(0, 0);
+            }
+
             using HttpResponseMessage response = await _client
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
                 .ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
-                return null;
+                return new MetadataProbe(
+                    null,
+                    MethodRejected: response.StatusCode == HttpStatusCode.MethodNotAllowed);
             }
 
-            // A static mirror publishes no content digest: an S3-compatible ETag is an MD5
-            // only for a single-part upload, and a CDN in front of it may rewrite the header
-            // altogether. So the ETag is kept as what it reliably is — an opaque validator for
-            // a conditional request — and length is what the finished file is checked against.
-            // A weak tag cannot be used with If-Range, so it is dropped.
+            bool partial = response.StatusCode == HttpStatusCode.PartialContent;
+
+            // A static mirror publishes no content digest: an S3-compatible ETag is an MD5 only
+            // for a single-part upload, and a CDN in front of it may rewrite the header. So the
+            // ETag is kept as what it reliably is — an opaque validator — and length is what the
+            // finished file is checked against. A weak tag is no use as a validator and is dropped.
             EntityTagHeaderValue? etag = response.Headers.ETag is { IsWeak: false } strong ? strong : null;
 
-            return new RemoteFileInfo(
-                response.Content.Headers.ContentLength,
-                etag,
-                response.Headers.AcceptRanges.Contains("bytes"));
+            return new MetadataProbe(
+                new RemoteFileInfo(
+                    partial ? response.Content.Headers.ContentRange?.Length : response.Content.Headers.ContentLength,
+                    etag,
+                    partial || response.Headers.AcceptRanges.Contains("bytes")),
+                MethodRejected: false);
         }
         catch (HttpRequestException)
         {
-            return null;
+            return default;
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            return default;
         }
     }
 
@@ -311,4 +398,6 @@ public sealed class ModelDownloader : IDisposable
         long? Length,
         EntityTagHeaderValue? Validator,
         bool SupportsRange);
+
+    private readonly record struct MetadataProbe(RemoteFileInfo? Info, bool MethodRejected);
 }

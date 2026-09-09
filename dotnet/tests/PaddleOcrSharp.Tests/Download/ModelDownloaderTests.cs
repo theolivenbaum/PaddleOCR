@@ -66,6 +66,8 @@ public class ModelDownloaderTests : IDisposable
         Directory.CreateDirectory(directory);
         await File.WriteAllBytesAsync(
             Path.Combine(directory, "weights.bin.part"), payload[..400], TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "weights.bin.part.etag"), "\"v1\"", TestContext.Current.CancellationToken);
 
         await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
 
@@ -78,20 +80,53 @@ public class ModelDownloaderTests : IDisposable
     }
 
     /// <summary>
-    /// A <c>.part</c> left over from an earlier copy of the file must not be appended to: the
-    /// result would be a splice of two files at exactly the length the server reports, which the
-    /// size check cannot detect. If-Range is what makes the server send the whole body instead.
+    /// A server may answer a ranged request with the whole representation — because it ignores
+    /// the header, or because <c>If-Range</c> failed. The partial file must then be replaced
+    /// rather than appended to.
     /// </summary>
     [Fact]
-    public async Task StalePartialFileIsDiscardedRatherThanSpliced()
+    public async Task ServerThatIgnoresTheRangeRestartsTheTransfer()
     {
         byte[] payload = Enumerable.Range(0, 1000).Select(i => (byte)(i % 251)).ToArray();
         var handler = new StubHandler
         {
             Files = { ["weights.bin"] = payload },
-            ETag = "\"v2\"",
-            ContentChanged = true,
+            ETag = "\"v1\"",
+            IgnoresRangeRequests = true,
         };
+
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("weights.bin")]);
+        using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
+
+        string directory = downloader.DirectoryFor(model);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllBytesAsync(
+            Path.Combine(directory, "weights.bin.part"),
+            payload[..400],
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "weights.bin.part.etag"), "\"v1\"", TestContext.Current.CancellationToken);
+
+        await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            payload,
+            await File.ReadAllBytesAsync(
+                Path.Combine(directory, "weights.bin"), TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A <c>.part</c> left over from an earlier copy of the file must not be appended to: the
+    /// result would splice two files into one of exactly the length the server reports, which the
+    /// size check cannot see. <c>If-Range</c> cannot catch this — the validator it carries is the
+    /// one just probed — so the validator recorded when the partial file was started is the only
+    /// thing standing between an interrupted transfer and a corrupt model.
+    /// </summary>
+    [Fact]
+    public async Task StalePartialFileIsDiscardedRatherThanSpliced()
+    {
+        byte[] payload = Enumerable.Range(0, 1000).Select(i => (byte)(i % 251)).ToArray();
+        var handler = new StubHandler { Files = { ["weights.bin"] = payload }, ETag = "\"v2\"" };
 
         var model = new ModelDescriptor("stub", "stub", [new ModelFile("weights.bin")]);
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
@@ -102,6 +137,8 @@ public class ModelDownloaderTests : IDisposable
             Path.Combine(directory, "weights.bin.part"),
             Enumerable.Repeat((byte)0xEE, 400).ToArray(),
             TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "weights.bin.part.etag"), "\"v1\"", TestContext.Current.CancellationToken);
 
         await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
 
@@ -109,6 +146,39 @@ public class ModelDownloaderTests : IDisposable
             payload,
             await File.ReadAllBytesAsync(
                 Path.Combine(directory, "weights.bin"), TestContext.Current.CancellationToken));
+        Assert.False(
+            File.Exists(Path.Combine(directory, "weights.bin.part.etag")),
+            "the recorded validator should be cleaned up with the finished file");
+    }
+
+    /// <summary>
+    /// The R2 bucket behind models.curiosity.ai answers HEAD with <c>405 Allow: PUT, GET,
+    /// DELETE</c>, so the length has to come from a one-byte ranged GET instead — and the refusal
+    /// is remembered, since a mirror that refuses HEAD for one file refuses it for all of them.
+    /// </summary>
+    [Fact]
+    public async Task LengthComesFromARangedGetWhenHeadIsRejected()
+    {
+        byte[] weights = Enumerable.Range(0, 4096).Select(i => (byte)i).ToArray();
+        var handler = new StubHandler
+        {
+            Files = { ["a.json"] = "{\"a\":1}"u8.ToArray(), ["weights.bin"] = weights },
+            RejectHead = true,
+            ETag = "\"v1\"",
+        };
+
+        using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("a.json"), new ModelFile("weights.bin")]);
+
+        string directory = await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            weights,
+            await File.ReadAllBytesAsync(
+                Path.Combine(directory, "weights.bin"), TestContext.Current.CancellationToken));
+        Assert.Equal(2, handler.ProbeRequests);
+        Assert.Equal(1, handler.HeadRequests);
+        Assert.True(downloader.IsComplete(model));
     }
 
     [Fact]
@@ -240,14 +310,23 @@ public class ModelDownloaderTests : IDisposable
         }
     }
 
-    /// <summary>An in-memory stand-in for the model mirror.</summary>
+    /// <summary>
+    /// An in-memory stand-in for the model mirror, close enough to the real one to be worth
+    /// asserting against: it answers ranged requests with a <c>Content-Range</c>, can refuse HEAD
+    /// the way an R2 bucket does, and ignores <c>If-Range</c> unless told to honour it.
+    /// </summary>
     private sealed class StubHandler : HttpMessageHandler
     {
         public Dictionary<string, byte[]> Files { get; } = new(StringComparer.Ordinal);
 
         public List<string> Requests { get; } = [];
 
+        /// <summary>Requests that transferred the file, excluding one-byte metadata probes.</summary>
         public int BodyRequests { get; private set; }
+
+        public int HeadRequests { get; private set; }
+
+        public int ProbeRequests { get; private set; }
 
         public bool SawRangeRequest { get; private set; }
 
@@ -258,8 +337,11 @@ public class ModelDownloaderTests : IDisposable
         /// <summary>ETag to advertise, quoted as the header syntax requires.</summary>
         public string? ETag { get; init; }
 
-        /// <summary>Answers a conditional range request as though the file had changed.</summary>
-        public bool ContentChanged { get; init; }
+        /// <summary>Answers HEAD with 405, as the bucket behind models.curiosity.ai does.</summary>
+        public bool RejectHead { get; init; }
+
+        /// <summary>Answers a ranged request with the whole body instead of a 206.</summary>
+        public bool IgnoresRangeRequests { get; init; }
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -268,6 +350,17 @@ public class ModelDownloaderTests : IDisposable
             string name = request.RequestUri!.Segments[^1];
             Requests.Add(request.RequestUri.ToString());
 
+            if (request.Method == HttpMethod.Head)
+            {
+                HeadRequests++;
+                if (RejectHead)
+                {
+                    var rejected = new HttpResponseMessage(HttpStatusCode.MethodNotAllowed);
+                    rejected.Content.Headers.Allow.Add("GET");
+                    return Task.FromResult(rejected);
+                }
+            }
+
             if (!Files.TryGetValue(name, out byte[]? payload))
             {
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
@@ -275,47 +368,77 @@ public class ModelDownloaderTests : IDisposable
 
             if (request.Method == HttpMethod.Head)
             {
-                var head = new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new ByteArrayContent([]),
-                };
+                var head = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
                 head.Content.Headers.ContentLength = payload.Length;
                 head.Headers.AcceptRanges.Add("bytes");
-                if (ETag is { } tag)
-                {
-                    head.Headers.ETag = new EntityTagHeaderValue(tag);
-                }
-
+                Tag(head);
                 return Task.FromResult(head);
             }
 
-            BodyRequests++;
+            RangeItemHeaderValue? range = request.Headers.Range?.Ranges.FirstOrDefault();
+            bool probe = range is { From: 0, To: 0 };
 
-            int offset = 0;
-            HttpStatusCode status = HttpStatusCode.OK;
-            if (request.Headers.Range?.Ranges.FirstOrDefault()?.From is { } from)
+            if (probe)
             {
-                SawRangeRequest = true;
-                SawIfRange |= request.Headers.IfRange is not null;
+                ProbeRequests++;
+            }
+            else
+            {
+                BodyRequests++;
+            }
 
-                if (request.Headers.IfRange is not null && ContentChanged)
+            if (range?.From is { } from)
+            {
+                if (!probe)
                 {
-                    // RFC 9110: a failed If-Range is answered with the whole representation.
-                    return Task.FromResult(
-                        new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) });
+                    SawRangeRequest = true;
+                    SawIfRange |= request.Headers.IfRange is not null;
+
+                    if (IgnoresRangeRequests)
+                    {
+                        return Task.FromResult(Whole(payload));
+                    }
                 }
 
-                offset = (int)from;
-                status = HttpStatusCode.PartialContent;
+                int start = (int)from;
+                int last = range.To is { } to
+                    ? Math.Min((int)to, payload.Length - 1)
+                    : payload.Length - 1;
+
+                byte[] slice = payload[start..(last + 1)];
+                if (TruncateBodyTo is { } cap && slice.Length > cap)
+                {
+                    slice = slice[..cap];
+                }
+
+                var partial = new HttpResponseMessage(HttpStatusCode.PartialContent)
+                {
+                    Content = new ByteArrayContent(slice),
+                };
+                partial.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, last, payload.Length);
+                Tag(partial);
+                return Task.FromResult(partial);
             }
 
-            byte[] body = payload[offset..];
-            if (TruncateBodyTo is { } limit && body.Length > limit)
+            return Task.FromResult(Whole(payload));
+        }
+
+        private HttpResponseMessage Whole(byte[] payload)
+        {
+            byte[] body = TruncateBodyTo is { } cap && payload.Length > cap ? payload[..cap] : payload;
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Content.Headers.ContentLength = payload.Length;
+            response.Headers.AcceptRanges.Add("bytes");
+            Tag(response);
+            return response;
+        }
+
+        private void Tag(HttpResponseMessage response)
+        {
+            if (ETag is { } tag)
             {
-                body = body[..limit];
+                response.Headers.ETag = new EntityTagHeaderValue(tag);
             }
-
-            return Task.FromResult(new HttpResponseMessage(status) { Content = new ByteArrayContent(body) });
         }
     }
 }
