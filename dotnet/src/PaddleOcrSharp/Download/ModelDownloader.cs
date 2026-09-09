@@ -1,35 +1,44 @@
 using System.Net;
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 
 namespace PaddleOcrSharp.Download;
 
 /// <summary>
-/// Fetches model files from a Hugging Face-compatible endpoint into a local cache.
+/// Fetches model files from a static HTTP mirror into a local cache.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Transfers resume from a <c>.part</c> file, are verified against the size and ETag the server
-/// reports, and are published by an atomic rename so a killed process never leaves a truncated
-/// file that later looks complete. A cross-process lock file makes concurrent CLI invocations
-/// safe.
+/// A file's URL is <c>{endpoint}/{remote path}/{file path}</c> — the mirror is a plain directory
+/// tree, so <c>https://models.curiosity.ai/paddleocr-vl/config.json</c> is the whole address of
+/// that file. Nothing here is specific to a model host's API.
 /// </para>
 /// <para>
-/// The endpoint can be redirected with <c>HF_ENDPOINT</c> for mirrors, and the cache root with
-/// <c>PADDLEOCR_SHARP_CACHE</c>.
+/// Transfers resume from a <c>.part</c> file, are verified against the length the server reports,
+/// and are published by an atomic rename so a killed process never leaves a truncated file that
+/// later looks complete. A cross-process lock file makes concurrent CLI invocations safe.
+/// </para>
+/// <para>
+/// The endpoint can be redirected with <c>PADDLEOCR_SHARP_MODELS_URL</c> for a private or local
+/// mirror, and the cache root with <c>PADDLEOCR_SHARP_CACHE</c>.
 /// </para>
 /// </remarks>
 public sealed class ModelDownloader : IDisposable
 {
-    private const string DefaultEndpoint = "https://huggingface.co";
+    private const string DefaultEndpoint = "https://models.curiosity.ai";
+    private const string EndpointVariable = "PADDLEOCR_SHARP_MODELS_URL";
+    private const string TokenVariable = "PADDLEOCR_SHARP_MODELS_TOKEN";
 
     private readonly HttpClient _client;
     private readonly bool _ownsClient;
 
     /// <summary>Creates a downloader with its own <see cref="HttpClient"/>.</summary>
     /// <param name="cacheRoot">Cache directory; defaults to the user cache.</param>
-    /// <param name="endpoint">Base URL; defaults to <c>HF_ENDPOINT</c> or huggingface.co.</param>
-    /// <param name="token">Optional bearer token for gated repositories.</param>
+    /// <param name="endpoint">
+    /// Base URL; defaults to <c>PADDLEOCR_SHARP_MODELS_URL</c> or models.curiosity.ai.
+    /// </param>
+    /// <param name="token">
+    /// Optional bearer token, for a mirror that is not public. The default endpoint needs none.
+    /// </param>
     public ModelDownloader(string? cacheRoot = null, string? endpoint = null, string? token = null)
         : this(CreateClient(token), ownsClient: true, cacheRoot, endpoint)
     {
@@ -42,7 +51,7 @@ public sealed class ModelDownloader : IDisposable
         _ownsClient = ownsClient;
         CacheRoot = cacheRoot ?? DefaultCacheRoot();
         Endpoint = (endpoint
-            ?? Environment.GetEnvironmentVariable("HF_ENDPOINT")
+            ?? Environment.GetEnvironmentVariable(EndpointVariable)
             ?? DefaultEndpoint).TrimEnd('/');
     }
 
@@ -53,8 +62,7 @@ public sealed class ModelDownloader : IDisposable
     public string Endpoint { get; }
 
     /// <summary>Directory a model resolves to, whether or not it has been downloaded.</summary>
-    public string DirectoryFor(ModelDescriptor model) =>
-        Path.Combine(CacheRoot, model.Name, Sanitise(model.Revision));
+    public string DirectoryFor(ModelDescriptor model) => Path.Combine(CacheRoot, model.Name);
 
     /// <summary>Whether every required file of <paramref name="model"/> is already present.</summary>
     public bool IsComplete(ModelDescriptor model)
@@ -104,7 +112,7 @@ public sealed class ModelDownloader : IDisposable
         string target = Path.Combine(directory, file.Path);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
 
-        string url = $"{Endpoint}/{model.Repository}/resolve/{model.Revision}/{file.Path}";
+        string url = $"{Endpoint}/{model.RemotePath}/{file.Path}";
         RemoteFileInfo? remote = await HeadAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (File.Exists(target))
@@ -138,6 +146,15 @@ public sealed class ModelDownloader : IDisposable
         if (offset > 0)
         {
             request.Headers.Range = new RangeHeaderValue(offset, null);
+
+            // If the mirror's copy changed since the .part was written, appending to it would
+            // splice two different files into one of exactly the right length — which the size
+            // check below cannot see. If-Range makes the server answer 200 with the whole body
+            // instead, and the stale partial content is discarded a few lines down.
+            if (remote.Value.Validator is { } validator)
+            {
+                request.Headers.IfRange = new RangeConditionHeaderValue(validator);
+            }
         }
 
         using HttpResponseMessage response = await _client
@@ -184,12 +201,6 @@ public sealed class ModelDownloader : IDisposable
             throw new IOException($"'{file.Path}' downloaded {actual} bytes but {expected} were expected.");
         }
 
-        if (remote.Value.Sha256 is { } digest && !await MatchesAsync(partial, digest, cancellationToken).ConfigureAwait(false))
-        {
-            File.Delete(partial);
-            throw new IOException($"'{file.Path}' failed its SHA-256 check.");
-        }
-
         File.Move(partial, target, overwrite: true);
     }
 
@@ -207,21 +218,16 @@ public sealed class ModelDownloader : IDisposable
                 return null;
             }
 
-            // Hugging Face returns the LFS object's SHA-256 in X-Linked-Etag for large files and
-            // a git blob hash in ETag for small ones; only the former is a content digest.
-            string? sha256 = null;
-            if (response.Headers.TryGetValues("X-Linked-Etag", out IEnumerable<string>? linked))
-            {
-                string value = linked.First().Trim('"');
-                if (value.Length == 64 && value.All(Uri.IsHexDigit))
-                {
-                    sha256 = value;
-                }
-            }
+            // A static mirror publishes no content digest: an S3-compatible ETag is an MD5
+            // only for a single-part upload, and a CDN in front of it may rewrite the header
+            // altogether. So the ETag is kept as what it reliably is — an opaque validator for
+            // a conditional request — and length is what the finished file is checked against.
+            // A weak tag cannot be used with If-Range, so it is dropped.
+            EntityTagHeaderValue? etag = response.Headers.ETag is { IsWeak: false } strong ? strong : null;
 
             return new RemoteFileInfo(
                 response.Content.Headers.ContentLength,
-                sha256,
+                etag,
                 response.Headers.AcceptRanges.Contains("bytes"));
         }
         catch (HttpRequestException)
@@ -232,13 +238,6 @@ public sealed class ModelDownloader : IDisposable
         {
             return null;
         }
-    }
-
-    private static async Task<bool> MatchesAsync(string path, string expected, CancellationToken cancellationToken)
-    {
-        await using FileStream stream = File.OpenRead(path);
-        byte[] digest = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        return Convert.ToHexStringLower(digest) == expected;
     }
 
     private static async Task<FileStream> AcquireLockAsync(string directory, CancellationToken cancellationToken)
@@ -276,7 +275,7 @@ public sealed class ModelDownloader : IDisposable
 
         client.DefaultRequestHeaders.UserAgent.ParseAdd("PaddleOcrSharp/0.1");
 
-        string? bearer = token ?? Environment.GetEnvironmentVariable("HF_TOKEN");
+        string? bearer = token ?? Environment.GetEnvironmentVariable(TokenVariable);
         if (!string.IsNullOrEmpty(bearer))
         {
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
@@ -299,9 +298,6 @@ public sealed class ModelDownloader : IDisposable
         return Path.Combine(cache, "paddleocr-sharp");
     }
 
-    private static string Sanitise(string value) =>
-        string.Concat(value.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-
     /// <inheritdoc />
     public void Dispose()
     {
@@ -311,5 +307,8 @@ public sealed class ModelDownloader : IDisposable
         }
     }
 
-    private readonly record struct RemoteFileInfo(long? Length, string? Sha256, bool SupportsRange);
+    private readonly record struct RemoteFileInfo(
+        long? Length,
+        EntityTagHeaderValue? Validator,
+        bool SupportsRange);
 }

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using PaddleOcrSharp.Download;
 
 namespace PaddleOcrSharp.Tests.Download;
@@ -25,7 +26,7 @@ public class ModelDownloaderTests : IDisposable
         };
 
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
-        var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("a.json"), new ModelFile("weights.bin")]);
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("a.json"), new ModelFile("weights.bin")]);
 
         var reports = new Collector();
         string directory = await downloader.EnsureAsync(model, reports, TestContext.Current.CancellationToken);
@@ -40,7 +41,7 @@ public class ModelDownloaderTests : IDisposable
     {
         var handler = new StubHandler { Files = { ["a.json"] = "{}"u8.ToArray() } };
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
-        var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("a.json")]);
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("a.json")]);
 
         await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
         int firstBodyCount = handler.BodyRequests;
@@ -56,9 +57,9 @@ public class ModelDownloaderTests : IDisposable
     public async Task PartialFileIsResumed()
     {
         byte[] payload = Enumerable.Range(0, 1000).Select(i => (byte)(i % 251)).ToArray();
-        var handler = new StubHandler { Files = { ["weights.bin"] = payload } };
+        var handler = new StubHandler { Files = { ["weights.bin"] = payload }, ETag = "\"v1\"" };
 
-        var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("weights.bin")]);
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("weights.bin")]);
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
 
         string directory = downloader.DirectoryFor(model);
@@ -73,6 +74,41 @@ public class ModelDownloaderTests : IDisposable
             await File.ReadAllBytesAsync(
                 Path.Combine(directory, "weights.bin"), TestContext.Current.CancellationToken));
         Assert.True(handler.SawRangeRequest);
+        Assert.True(handler.SawIfRange);
+    }
+
+    /// <summary>
+    /// A <c>.part</c> left over from an earlier copy of the file must not be appended to: the
+    /// result would be a splice of two files at exactly the length the server reports, which the
+    /// size check cannot detect. If-Range is what makes the server send the whole body instead.
+    /// </summary>
+    [Fact]
+    public async Task StalePartialFileIsDiscardedRatherThanSpliced()
+    {
+        byte[] payload = Enumerable.Range(0, 1000).Select(i => (byte)(i % 251)).ToArray();
+        var handler = new StubHandler
+        {
+            Files = { ["weights.bin"] = payload },
+            ETag = "\"v2\"",
+            ContentChanged = true,
+        };
+
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("weights.bin")]);
+        using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
+
+        string directory = downloader.DirectoryFor(model);
+        Directory.CreateDirectory(directory);
+        await File.WriteAllBytesAsync(
+            Path.Combine(directory, "weights.bin.part"),
+            Enumerable.Repeat((byte)0xEE, 400).ToArray(),
+            TestContext.Current.CancellationToken);
+
+        await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            payload,
+            await File.ReadAllBytesAsync(
+                Path.Combine(directory, "weights.bin"), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -85,7 +121,7 @@ public class ModelDownloaderTests : IDisposable
         };
 
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
-        var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("weights.bin")]);
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("weights.bin")]);
 
         await Assert.ThrowsAsync<IOException>(() =>
             downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken));
@@ -99,7 +135,7 @@ public class ModelDownloaderTests : IDisposable
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
 
         var model = new ModelDescriptor(
-            "stub", "org/stub", "main", [new ModelFile("a.json"), new ModelFile("optional.json", Required: false)]);
+            "stub", "stub", [new ModelFile("a.json"), new ModelFile("optional.json", Required: false)]);
 
         string directory = await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
 
@@ -112,10 +148,50 @@ public class ModelDownloaderTests : IDisposable
     {
         var handler = new StubHandler();
         using var downloader = new ModelDownloader(new HttpClient(handler), ownsClient: true, _cache, "https://stub");
-        var model = new ModelDescriptor("stub", "org/stub", "main", [new ModelFile("missing.json")]);
+        var model = new ModelDescriptor("stub", "stub", [new ModelFile("missing.json")]);
 
         await Assert.ThrowsAnyAsync<Exception>(() =>
             downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RequestsTheMirrorsFlatLayout()
+    {
+        var handler = new StubHandler { Files = { ["config.json"] = "{}"u8.ToArray() } };
+        using var downloader = new ModelDownloader(
+            new HttpClient(handler), ownsClient: true, _cache, "https://models.example/");
+        var model = new ModelDescriptor("stub", "paddleocr-vl", [new ModelFile("config.json")]);
+
+        await downloader.EnsureAsync(model, null, TestContext.Current.CancellationToken);
+
+        Assert.NotEmpty(handler.Requests);
+        Assert.All(
+            handler.Requests,
+            uri => Assert.Equal("https://models.example/paddleocr-vl/config.json", uri));
+    }
+
+    [Fact]
+    public void ModelDirectoryIsJustTheModelName()
+    {
+        using var downloader = new ModelDownloader(
+            new HttpClient(new StubHandler()), ownsClient: true, _cache, "https://stub");
+
+        Assert.Equal(
+            Path.Combine(_cache, "PaddleOCR-VL-1.6"),
+            downloader.DirectoryFor(ModelCatalog.PaddleOcrVL16));
+    }
+
+    /// <summary>
+    /// The remote paths are the mirror's directory names; a typo here is a 404 at first run, so
+    /// they are pinned rather than derived from the model name.
+    /// </summary>
+    [Fact]
+    public void CatalogueMirrorsTheBucketsDirectoryNames()
+    {
+        Assert.Equal("paddleocr-vl", ModelCatalog.PaddleOcrVL16.RemotePath);
+        Assert.Equal("pp-doclayoutv3", ModelCatalog.PpDocLayoutV3.RemotePath);
+        Assert.Equal("pp-lcnet-x1-0-doc-ori", ModelCatalog.DocOrientationClassifier.RemotePath);
+        Assert.Equal("uvdoc", ModelCatalog.DocUnwarping.RemotePath);
     }
 
     [Fact]
@@ -164,22 +240,33 @@ public class ModelDownloaderTests : IDisposable
         }
     }
 
-    /// <summary>An in-memory stand-in for the Hugging Face file endpoint.</summary>
+    /// <summary>An in-memory stand-in for the model mirror.</summary>
     private sealed class StubHandler : HttpMessageHandler
     {
         public Dictionary<string, byte[]> Files { get; } = new(StringComparer.Ordinal);
+
+        public List<string> Requests { get; } = [];
 
         public int BodyRequests { get; private set; }
 
         public bool SawRangeRequest { get; private set; }
 
+        public bool SawIfRange { get; private set; }
+
         public int? TruncateBodyTo { get; init; }
+
+        /// <summary>ETag to advertise, quoted as the header syntax requires.</summary>
+        public string? ETag { get; init; }
+
+        /// <summary>Answers a conditional range request as though the file had changed.</summary>
+        public bool ContentChanged { get; init; }
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
             string name = request.RequestUri!.Segments[^1];
+            Requests.Add(request.RequestUri.ToString());
 
             if (!Files.TryGetValue(name, out byte[]? payload))
             {
@@ -194,6 +281,11 @@ public class ModelDownloaderTests : IDisposable
                 };
                 head.Content.Headers.ContentLength = payload.Length;
                 head.Headers.AcceptRanges.Add("bytes");
+                if (ETag is { } tag)
+                {
+                    head.Headers.ETag = new EntityTagHeaderValue(tag);
+                }
+
                 return Task.FromResult(head);
             }
 
@@ -204,6 +296,15 @@ public class ModelDownloaderTests : IDisposable
             if (request.Headers.Range?.Ranges.FirstOrDefault()?.From is { } from)
             {
                 SawRangeRequest = true;
+                SawIfRange |= request.Headers.IfRange is not null;
+
+                if (request.Headers.IfRange is not null && ContentChanged)
+                {
+                    // RFC 9110: a failed If-Range is answered with the whole representation.
+                    return Task.FromResult(
+                        new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) });
+                }
+
                 offset = (int)from;
                 status = HttpStatusCode.PartialContent;
             }

@@ -19,7 +19,7 @@ public static class Help
             Common options:
               --model-dir <path>      Use a checkpoint directory instead of the cache
               --cache <path>          Override the cache root (default: ~/.cache/paddleocr-sharp)
-              --endpoint <url>        Hugging Face-compatible endpoint (default: HF_ENDPOINT)
+              --endpoint <url>        Model mirror base URL (default: PADDLEOCR_SHARP_MODELS_URL)
 
             parse options:
               --layout-dir <path>     Use a PP-DocLayoutV3 directory instead of the cache

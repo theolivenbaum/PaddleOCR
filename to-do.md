@@ -35,9 +35,9 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture notes and conventions.
 
 ## 3. Model downloader — `src/PaddleOcrSharp/Download`
 
-- [x] Hugging Face resolve-URL downloader: ranged resume, SHA-256/etag verify, parallel chunks
-- [x] Local cache layout (`~/.cache/paddleocr-sharp/<repo>/<revision>/`) with lockfile
-- [x] Mirror support (HF endpoint override, BOS/AIStudio)
+- [x] Static-mirror downloader: ranged resume, length verify, parallel chunks
+- [x] Local cache layout (`~/.cache/paddleocr-sharp/<model>/`) with lockfile
+- [x] Mirror support (`PADDLEOCR_SHARP_MODELS_URL` endpoint override, bearer token)
 - [x] Manifests for `PaddleOCR-VL-1.6`, `PP-DocLayoutV3`, `PP-LCNet_x1_0_doc_ori`, `UVDoc`
 - [x] `paddleocr-sharp download` CLI verb + progress reporting
 - [x] Tests: manifest resolution, cache hit/miss, resume, corrupt-file detection
