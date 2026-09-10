@@ -202,3 +202,25 @@ orientation classifier.*
       closed. The Paddle operator kernels are `internal` — nothing outside the interpreter used
       them. The rest of the surface stays public on purpose: this port is meant to be inspectable
       stage by stage, which is also how the parity tests reach it.
+
+## Performance — measured on the scanned corpus
+
+- [x] `PageProfile`: per-stage wall time and allocations for everything outside the model call,
+      printed by `parse --profile`; `--layout-profile` adds the layout graph's operators
+- [x] Attention records its own parts from inside, as thread-ticks, since it threads over heads
+- [x] Cap `Parallel.For` at the core count everywhere (`Core/Parallelism.cs`)
+- [x] Attention score product: transposed keys, four rows by two column vectors, token block
+      outermost
+- [x] Attention value product: chunked reduction with the output tile in registers
+- [x] Baseline and after, six pages of `pdf_scanned` + `images/ocr_*`, one page each
+- [ ] The layout graph is 8.3% of the corpus and allocates 4.5 GiB per detection, most of it
+      `Bool[1, 300, 200, 200]` masks held as `long[]` — 96 MB where 12 would do. Storing booleans
+      and 32-bit integers compactly is the change; it touches every operator kernel, so it wants
+      its own slice. Note that vectorising the broadcast fallback and tuning the GC were both
+      tried and were both neutral (see CLAUDE.md), so the allocation itself is the remaining
+      hypothesis, not the arithmetic.
+- [ ] Only ~10 of the layout graph's 300 query masks survive the score threshold, and the graph
+      reduces all 300. Pruning would be a semantic change to a fetched tensor, so it needs care.
+- [ ] Decode is 16% of the corpus at ~721 MB of bf16 weights per token, and the profile says it is
+      bandwidth-bound on streaming them. Nothing here changed it; the lever is reading fewer bytes,
+      not a faster kernel.
