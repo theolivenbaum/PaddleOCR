@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Formats.Paddle;
 
 namespace PaddleOcrSharp.Models.Paddle.Ops;
@@ -54,7 +55,7 @@ internal static class ReduceOps
         // `min(x, axis=[-2, -1])` over a mask stack looks like — every output element owns one
         // contiguous run of the input, so the whole reduction is a walk of vectorised segments
         // instead of a per-element index computation.
-        if (IsSuffix(reduced, rank) && input.IsFloat && kind != Kind.Any && input.Count > 0)
+        if (IsSuffix(reduced, rank) && input.Count > 0)
         {
             int inner = 1;
             for (int axis = rank - reduced.Count; axis < rank; axis++)
@@ -62,9 +63,19 @@ internal static class ReduceOps
                 inner *= input.Shape[axis];
             }
 
-            if (inner > 0)
+            if (inner > 0 && input.IsFloat && kind != Kind.Any)
             {
                 ReduceSegments(input.FloatSpan, inner, kind, result.FloatSpan);
+                return result;
+            }
+
+            // `any` over a mask stack is this shape and nothing else: [1, 300, 200, 200] reduced
+            // to [1, 300], twelve million elements. Through the general walk below it cost 68 ms
+            // of a 3.2 s detection — an index recomputed per element from the shape, and every
+            // element through `double`.
+            if (inner > 0 && kind == Kind.Any && !input.IsFloat)
+            {
+                AnySegments(input.Ints!, input.Count, inner, result.Ints!);
                 return result;
             }
         }
@@ -142,7 +153,25 @@ internal static class ReduceOps
     }
 
 
+    /// <summary>Whether each contiguous segment holds a non-zero, one output element apiece.</summary>
+    /// <param name="source">Integral storage, segments back to back.</param>
+    /// <param name="count">Elements in <paramref name="source"/>.</param>
+    /// <param name="inner">Elements per segment.</param>
+    /// <param name="destination">One element per segment.</param>
+    private static void AnySegments(long[] source, int count, int inner, long[] destination)
+    {
+        int segments = count / inner;
+
+        Parallel.For(0, segments, Parallelism.Options, i =>
+        {
+            ReadOnlySpan<long> segment = source.AsSpan(i * inner, inner);
+            destination[i] = segment.ContainsAnyExcept(0L) ? 1 : 0;
+        });
+    }
+
     /// <summary>Whether the reduced axes form a contiguous suffix of a rank-<paramref name="rank"/> shape.</summary>
+    /// <param name="reduced">The axes being reduced.</param>
+    /// <param name="rank">Rank of the tensor.</param>
     private static bool IsSuffix(HashSet<int> reduced, int rank)
     {
         for (int axis = rank - reduced.Count; axis < rank; axis++)
@@ -275,42 +304,48 @@ internal static class ReduceOps
         int[] conditionStrides = Broadcast.StridesFor(condition.Shape, shape);
         int[] xStrides = Broadcast.StridesFor(x.Shape, shape);
         int[] yStrides = Broadcast.StridesFor(y.Shape, shape);
-        int[] counters = new int[shape.Length];
 
-        int conditionOffset = 0;
-        int xOffset = 0;
-        int yOffset = 0;
-
-        for (int i = 0; i < result.Count; i++)
+        // Three calls a detection over [1, 300, 200, 200], which is twelve million selections
+        // apiece; each chunk seeds its own counters and walks from there.
+        Parallelism.Chunked(result.Count, (start, end) =>
         {
-            bool take = condition.GetLong(conditionOffset) != 0;
-            if (result.IsFloat)
-            {
-                result.Floats![i] = take ? x.Floats![xOffset] : y.Floats![yOffset];
-            }
-            else
-            {
-                result.Ints![i] = take ? x.GetLong(xOffset) : y.GetLong(yOffset);
-            }
+            int[] counters = new int[shape.Length];
+            Broadcast.Seed(start, shape, counters);
+            int conditionOffset = Broadcast.Offset(counters, conditionStrides);
+            int xOffset = Broadcast.Offset(counters, xStrides);
+            int yOffset = Broadcast.Offset(counters, yStrides);
 
-            for (int axis = shape.Length - 1; axis >= 0; axis--)
+            for (int i = start; i < end; i++)
             {
-                counters[axis]++;
-                conditionOffset += conditionStrides[axis];
-                xOffset += xStrides[axis];
-                yOffset += yStrides[axis];
-
-                if (counters[axis] < shape[axis])
+                bool take = condition.GetLong(conditionOffset) != 0;
+                if (result.IsFloat)
                 {
-                    break;
+                    result.Floats![i] = take ? x.Floats![xOffset] : y.Floats![yOffset];
+                }
+                else
+                {
+                    result.Ints![i] = take ? x.GetLong(xOffset) : y.GetLong(yOffset);
                 }
 
-                conditionOffset -= conditionStrides[axis] * shape[axis];
-                xOffset -= xStrides[axis] * shape[axis];
-                yOffset -= yStrides[axis] * shape[axis];
-                counters[axis] = 0;
+                for (int axis = shape.Length - 1; axis >= 0; axis--)
+                {
+                    counters[axis]++;
+                    conditionOffset += conditionStrides[axis];
+                    xOffset += xStrides[axis];
+                    yOffset += yStrides[axis];
+
+                    if (counters[axis] < shape[axis])
+                    {
+                        break;
+                    }
+
+                    conditionOffset -= conditionStrides[axis] * shape[axis];
+                    xOffset -= xStrides[axis] * shape[axis];
+                    yOffset -= yStrides[axis] * shape[axis];
+                    counters[axis] = 0;
+                }
             }
-        }
+        });
 
         return result;
     }

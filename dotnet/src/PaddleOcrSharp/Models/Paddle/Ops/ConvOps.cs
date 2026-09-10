@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Formats;
 
@@ -283,6 +284,16 @@ internal static class ConvOps
         float[] filters = weight.Floats!;
         float[] destination = result.Floats!;
         int kernelSize = kernelHeight * kernelWidth;
+        int strideY = strides[0];
+        int strideX = strides[1];
+        int dilationY = dilations[0];
+        int dilationX = dilations[1];
+
+        // Output columns whose every horizontal tap lands inside the image. Only these can be
+        // done a vector at a time; the few on either side keep the scalar path.
+        int interiorStart = Math.Clamp(padLeft, 0, outWidth);
+        int interiorEnd = Math.Clamp(inWidth - ((kernelWidth - 1) * dilationX) + padLeft, interiorStart, outWidth);
+        bool vectorise = Simd.Use256 && strideX == 1 && interiorEnd - interiorStart >= Vector256<float>.Count;
 
         Parallel.For(0, batch * channels, Parallelism.Options, index =>
         {
@@ -294,34 +305,162 @@ internal static class ConvOps
 
             for (int oy = 0; oy < outHeight; oy++)
             {
-                for (int ox = 0; ox < outWidth; ox++)
+                Span<float> row = destination.AsSpan(outputBase + (oy * outWidth), outWidth);
+                int first = vectorise ? interiorStart : outWidth;
+                int last = vectorise ? interiorEnd : outWidth;
+
+                for (int ox = 0; ox < first; ox++)
                 {
-                    float sum = 0f;
-                    for (int ky = 0; ky < kernelHeight; ky++)
-                    {
-                        int iy = (oy * strides[0]) - padTop + (ky * dilations[0]);
-                        if ((uint)iy >= (uint)inHeight)
-                        {
-                            continue;
-                        }
+                    row[ox] = Tap(source, filters, inputBase, filterBase, inHeight, inWidth,
+                        kernelHeight, kernelWidth, strideY, strideX, dilationY, dilationX,
+                        padTop, padLeft, oy, ox);
+                }
 
-                        int rowBase = inputBase + (iy * inWidth);
-                        int filterRow = filterBase + (ky * kernelWidth);
+                if (vectorise)
+                {
+                    Interior(
+                        source, filters, row, inputBase, filterBase, inHeight, inWidth,
+                        kernelHeight, kernelWidth, strideY, dilationY, dilationX, padTop, padLeft,
+                        oy, first, last);
+                }
 
-                        for (int kx = 0; kx < kernelWidth; kx++)
-                        {
-                            int ix = (ox * strides[1]) - padLeft + (kx * dilations[1]);
-                            if ((uint)ix < (uint)inWidth)
-                            {
-                                sum += source[rowBase + ix] * filters[filterRow + kx];
-                            }
-                        }
-                    }
-
-                    destination[outputBase + (oy * outWidth) + ox] = sum;
+                for (int ox = last; ox < outWidth; ox++)
+                {
+                    row[ox] = Tap(source, filters, inputBase, filterBase, inHeight, inWidth,
+                        kernelHeight, kernelWidth, strideY, strideX, dilationY, dilationX,
+                        padTop, padLeft, oy, ox);
                 }
             }
         });
+    }
+
+    /// <summary>One depthwise output, taps bounds-checked. The image border, and any stride.</summary>
+    private static float Tap(
+        float[] source,
+        float[] filters,
+        int inputBase,
+        int filterBase,
+        int inHeight,
+        int inWidth,
+        int kernelHeight,
+        int kernelWidth,
+        int strideY,
+        int strideX,
+        int dilationY,
+        int dilationX,
+        int padTop,
+        int padLeft,
+        int outY,
+        int outX)
+    {
+        float sum = 0f;
+
+        for (int ky = 0; ky < kernelHeight; ky++)
+        {
+            int iy = (outY * strideY) - padTop + (ky * dilationY);
+            if ((uint)iy >= (uint)inHeight)
+            {
+                continue;
+            }
+
+            int rowBase = inputBase + (iy * inWidth);
+            int filterRow = filterBase + (ky * kernelWidth);
+
+            for (int kx = 0; kx < kernelWidth; kx++)
+            {
+                int ix = (outX * strideX) - padLeft + (kx * dilationX);
+                if ((uint)ix < (uint)inWidth)
+                {
+                    sum += source[rowBase + ix] * filters[filterRow + kx];
+                }
+            }
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// The stride-1 interior of one depthwise output row, a vector of output columns at a time.
+    /// </summary>
+    /// <remarks>
+    /// The accumulator stays in a register across the whole 5x5 window, so the row is stored once
+    /// rather than once per tap. Written out per output column instead — which is what the
+    /// operator did — a 128-channel 100x100 depthwise ran at 3.7 GFLOP/s, bounds-checking every
+    /// one of its twenty-five taps.
+    /// </remarks>
+    private static void Interior(
+        float[] source,
+        float[] filters,
+        Span<float> row,
+        int inputBase,
+        int filterBase,
+        int inHeight,
+        int inWidth,
+        int kernelHeight,
+        int kernelWidth,
+        int strideY,
+        int dilationY,
+        int dilationX,
+        int padTop,
+        int padLeft,
+        int outY,
+        int first,
+        int last)
+    {
+        int width = Vector256<float>.Count;
+        ref float input = ref MemoryMarshal.GetArrayDataReference(source);
+
+        int ox = first;
+        for (; ox <= last - width; ox += width)
+        {
+            Vector256<float> sum = Vector256<float>.Zero;
+
+            for (int ky = 0; ky < kernelHeight; ky++)
+            {
+                int iy = (outY * strideY) - padTop + (ky * dilationY);
+                if ((uint)iy >= (uint)inHeight)
+                {
+                    continue;
+                }
+
+                int rowBase = inputBase + (iy * inWidth) + ox - padLeft;
+                int filterRow = filterBase + (ky * kernelWidth);
+
+                for (int kx = 0; kx < kernelWidth; kx++)
+                {
+                    sum = Vector256.FusedMultiplyAdd(
+                        Vector256.LoadUnsafe(ref input, (nuint)(rowBase + (kx * dilationX))),
+                        Vector256.Create(filters[filterRow + kx]),
+                        sum);
+                }
+            }
+
+            sum.StoreUnsafe(ref MemoryMarshal.GetReference(row), (nuint)ox);
+        }
+
+        for (; ox < last; ox++)
+        {
+            float sum = 0f;
+
+            for (int ky = 0; ky < kernelHeight; ky++)
+            {
+                int iy = (outY * strideY) - padTop + (ky * dilationY);
+                if ((uint)iy >= (uint)inHeight)
+                {
+                    continue;
+                }
+
+                int rowBase = inputBase + (iy * inWidth) + ox - padLeft;
+                int filterRow = filterBase + (ky * kernelWidth);
+
+                for (int kx = 0; kx < kernelWidth; kx++)
+                {
+                    sum += source[rowBase + (kx * dilationX)] * filters[filterRow + kx];
+                }
+            }
+
+            row[ox] = sum;
+        }
     }
 
     /// <summary>2-D pooling, matching <c>pd_op.pool2d</c>.</summary>

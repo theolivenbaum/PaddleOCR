@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Formats.Paddle;
 
 namespace PaddleOcrSharp.Models.Paddle.Ops;
@@ -28,33 +29,39 @@ internal static class ShapeOps
             mappedStrides[i] = sourceStrides[permutation[i]];
         }
 
-        int[] counters = new int[rank];
-        int sourceOffset = 0;
-
-        for (int i = 0; i < result.Count; i++)
+        // 83 transposes a detection, the largest of them [1, 256, 10000]. Each chunk seeds its
+        // own counters from its first result index and walks the permuted strides from there.
+        Parallelism.Chunked(result.Count, (from, to) =>
         {
-            if (input.IsFloat)
-            {
-                result.Floats![i] = input.Floats![sourceOffset];
-            }
-            else
-            {
-                result.Ints![i] = input.Ints![sourceOffset];
-            }
+            int[] counters = new int[rank];
+            Broadcast.Seed(from, shape, counters);
+            int sourceOffset = Broadcast.Offset(counters, mappedStrides);
 
-            for (int axis = rank - 1; axis >= 0; axis--)
+            for (int i = from; i < to; i++)
             {
-                counters[axis]++;
-                sourceOffset += mappedStrides[axis];
-                if (counters[axis] < shape[axis])
+                if (input.IsFloat)
                 {
-                    break;
+                    result.Floats![i] = input.Floats![sourceOffset];
+                }
+                else
+                {
+                    result.Ints![i] = input.Ints![sourceOffset];
                 }
 
-                sourceOffset -= mappedStrides[axis] * shape[axis];
-                counters[axis] = 0;
+                for (int axis = rank - 1; axis >= 0; axis--)
+                {
+                    counters[axis]++;
+                    sourceOffset += mappedStrides[axis];
+                    if (counters[axis] < shape[axis])
+                    {
+                        break;
+                    }
+
+                    sourceOffset -= mappedStrides[axis] * shape[axis];
+                    counters[axis] = 0;
+                }
             }
-        }
+        });
 
         return result;
     }

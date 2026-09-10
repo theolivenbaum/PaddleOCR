@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Formats.Paddle;
 
 namespace PaddleOcrSharp.Models.Paddle.Ops;
@@ -52,6 +53,37 @@ internal static class Broadcast
     }
 
     /// <summary>
+    /// Seeds a walk's per-axis counters so it can start at <paramref name="index"/> rather than at
+    /// zero, which is what lets these walks be split across threads.
+    /// </summary>
+    /// <param name="index">Linear index into the result.</param>
+    /// <param name="shape">The result shape being walked.</param>
+    /// <param name="counters">Receives the per-axis position of <paramref name="index"/>.</param>
+    public static void Seed(int index, int[] shape, int[] counters)
+    {
+        for (int axis = shape.Length - 1; axis >= 0; axis--)
+        {
+            counters[axis] = shape[axis] == 0 ? 0 : index % shape[axis];
+            index = shape[axis] == 0 ? 0 : index / shape[axis];
+        }
+    }
+
+    /// <summary>An operand's offset at the position <paramref name="counters"/> names.</summary>
+    /// <param name="counters">Per-axis position, from <see cref="Seed"/>.</param>
+    /// <param name="strides">The operand's strides, from <see cref="StridesFor"/>.</param>
+    /// <returns>The operand's linear offset.</returns>
+    public static int Offset(int[] counters, int[] strides)
+    {
+        int offset = 0;
+        for (int axis = 0; axis < counters.Length; axis++)
+        {
+            offset += counters[axis] * strides[axis];
+        }
+
+        return offset;
+    }
+
+    /// <summary>
     /// Applies <paramref name="operation"/> element-wise with broadcasting over two float tensors.
     /// </summary>
     public static PaddleTensor Apply(PaddleTensor left, PaddleTensor right, Func<double, double, double> operation)
@@ -95,14 +127,17 @@ internal static class Broadcast
         // delegate and the double conversion behind it.
         if (left.IsFloat && right.IsFloat && right.Count == 1 && left.Count == count)
         {
-            ReadOnlySpan<float> source = left.FloatSpan;
-            Span<long> destination = result.IntSpan;
+            float[] source = left.Floats!;
+            long[] destination = result.Ints!;
             float threshold = right.FloatSpan[0];
 
-            for (int i = 0; i < count; i++)
+            Parallelism.Chunked(count, (start, end) =>
             {
-                destination[i] = predicate(source[i], threshold) ? 1 : 0;
-            }
+                for (int i = start; i < end; i++)
+                {
+                    destination[i] = predicate(source[i], threshold) ? 1 : 0;
+                }
+            });
 
             return result;
         }
@@ -126,40 +161,50 @@ internal static class Broadcast
         // Fast path: identical shapes need no index arithmetic at all.
         if (left.Count == count && right.Count == count && shape.Length == left.Rank && shape.Length == right.Rank)
         {
-            for (int i = 0; i < count; i++)
+            Parallelism.Chunked(count, (start, end) =>
             {
-                emit(i, left.GetDouble(i), right.GetDouble(i));
-            }
+                for (int i = start; i < end; i++)
+                {
+                    emit(i, left.GetDouble(i), right.GetDouble(i));
+                }
+            });
 
             return;
         }
 
         int[] leftStrides = StridesFor(left.Shape, shape);
         int[] rightStrides = StridesFor(right.Shape, shape);
-        int[] counters = new int[shape.Length];
 
-        int leftOffset = 0;
-        int rightOffset = 0;
-
-        for (int i = 0; i < count; i++)
+        // Split by result index; each chunk seeds its own counters, so the walk no longer has to
+        // start at zero. The mask head's broadcasts are over the leading dimensions of twelve
+        // million elements, which is where this operator's time is.
+        Parallelism.Chunked(count, (start, end) =>
         {
-            emit(i, left.GetDouble(leftOffset), right.GetDouble(rightOffset));
+            int[] counters = new int[shape.Length];
+            Seed(start, shape, counters);
+            int leftOffset = Offset(counters, leftStrides);
+            int rightOffset = Offset(counters, rightStrides);
 
-            for (int axis = shape.Length - 1; axis >= 0; axis--)
+            for (int i = start; i < end; i++)
             {
-                counters[axis]++;
-                leftOffset += leftStrides[axis];
-                rightOffset += rightStrides[axis];
+                emit(i, left.GetDouble(leftOffset), right.GetDouble(rightOffset));
 
-                if (counters[axis] < shape[axis])
+                for (int axis = shape.Length - 1; axis >= 0; axis--)
                 {
-                    break;
-                }
+                    counters[axis]++;
+                    leftOffset += leftStrides[axis];
+                    rightOffset += rightStrides[axis];
 
-                leftOffset -= leftStrides[axis] * shape[axis];
-                rightOffset -= rightStrides[axis] * shape[axis];
-                counters[axis] = 0;
+                    if (counters[axis] < shape[axis])
+                    {
+                        break;
+                    }
+
+                    leftOffset -= leftStrides[axis] * shape[axis];
+                    rightOffset -= rightStrides[axis] * shape[axis];
+                    counters[axis] = 0;
+                }
             }
-        }
+        });
     }
 }

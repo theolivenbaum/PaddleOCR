@@ -84,9 +84,20 @@ internal static class ElementwiseOps
         }
 
         PaddleTensor result = PaddleTensor.Float([.. input.Shape]);
-        ReadOnlySpan<float> source = input.FloatSpan;
-        Span<float> destination = result.FloatSpan;
+        float[] source = input.Floats!;
+        float[] destination = result.Floats!;
 
+        // 81 ReLUs a detection, over feature maps of millions of elements: the pass is worth
+        // splitting even though each element is a single instruction.
+        Parallelism.Chunked(result.Count, (start, end) => Activate(
+            source.AsSpan(start, end - start), destination.AsSpan(start, end - start), activation));
+
+        return result;
+    }
+
+    /// <summary>One chunk of an activation.</summary>
+    private static void Activate(ReadOnlySpan<float> source, Span<float> destination, Unary activation)
+    {
         switch (activation)
         {
             case Unary.Relu:
@@ -125,8 +136,6 @@ internal static class ElementwiseOps
 
                 break;
         }
-
-        return result;
     }
 
     /// <summary>Computes <c>x · scale + bias</c>, or <c>(x + bias) · scale</c>.</summary>
@@ -283,7 +292,7 @@ internal static class ElementwiseOps
         if (left.Count == right.Count && left.Shape.AsSpan().SequenceEqual(right.Shape))
         {
             result = PaddleTensor.Float([.. left.Shape]);
-            Run(left.FloatSpan, right.FloatSpan, result.FloatSpan, operation);
+            Threaded(left.Floats!, right.Floats!, result.Floats!, result.Count, operation);
             return true;
         }
 
@@ -291,7 +300,7 @@ internal static class ElementwiseOps
         if (right.Count == 1)
         {
             result = PaddleTensor.Float([.. left.Shape]);
-            RunScalar(left.FloatSpan, right.FloatSpan[0], result.FloatSpan, operation, scalarOnRight: true);
+            Threaded(left.Floats!, right.FloatSpan[0], result.Floats!, result.Count, operation, scalarOnRight: true);
             return true;
         }
 
@@ -346,6 +355,22 @@ internal static class ElementwiseOps
 
         return true;
     }
+
+    /// <summary>
+    /// <see cref="Run(ReadOnlySpan{float}, ReadOnlySpan{float}, Span{float}, Binary)"/> over
+    /// chunks of the tensors, in parallel where there is enough of it.
+    /// </summary>
+    private static void Threaded(float[] a, float[] b, float[] y, int count, Binary operation) =>
+        Parallelism.Chunked(count, (start, end) => Run(
+            a.AsSpan(start, end - start), b.AsSpan(start, end - start),
+            y.AsSpan(start, end - start), operation));
+
+    /// <inheritdoc cref="Threaded(float[], float[], float[], int, Binary)"/>
+    private static void Threaded(
+        float[] values, float scalar, float[] y, int count, Binary operation, bool scalarOnRight) =>
+        Parallelism.Chunked(count, (start, end) => RunScalar(
+            values.AsSpan(start, end - start), scalar,
+            y.AsSpan(start, end - start), operation, scalarOnRight));
 
     private static void Run(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> y, Binary operation)
     {
