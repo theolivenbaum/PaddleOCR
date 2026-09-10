@@ -442,8 +442,46 @@ its own output before writing it would have been quietly correct and would now p
 `PADDLEOCR_SHARP_POISON_ARENA=1` fills every rented buffer with `NaN` and `long.MinValue` first;
 the corpus is byte-identical with it on, which is what says no operator does that.
 
-The remaining 145 MiB is not the tensors — it is a shape array, a results array and a few stride
-vectors per operator, several thousand times over. Worth taking only after something else.
+The 145 MiB that remained was not scaffolding, which is what it looked like. `PirProfile` now
+reports allocation per operator beside the timings, and it put 128 of the 145 against a single
+operator — so the guess that it was a shape array and a results array per operator, several
+thousand times over, was wrong twice: wrong about the shape, and describing something that adds up
+to 2.5 MiB.
+
+`TensorArena` reports its own accounting under `PADDLEOCR_SHARP_ARENA_STATS=1`, which is what
+identified it. Per detection, steady state:
+
+```
+arena: 1611 rents of 6359 MiB, 3 missed the pool (0 MiB allocated); returned 6231 MiB at
+last use and 0 MiB at the end; 128 MiB kept as fetches
+```
+
+**The 128 MiB was the fetches.** A run's intermediates all go back at their last use, but its
+fetches cannot — they are the caller's. So each run took a bucket's worth of buffers out of
+circulation and the next run allocated the shortfall again, and for a `[1, 300, 200, 200]` mask
+that is 128 MiB a page in perpetuity. `RunPooled` returns a `PirRunResult` that gives those
+buffers back when disposed; all three callers copy what they need out of the fetches and drop
+them, so all three use it.
+
+A further 8 MiB was the graph's *input* tensor, built before the run and so never seen by the
+arena inside it. Rented and returned by hand.
+
+| | per detection |
+| --- | --- |
+| before the arena | 4,458 MiB |
+| arena | 145 MiB |
+| fetches returned to the pool | 17 MiB |
+| input tensor rented | **9 MiB** |
+
+What is left is the scaffolding, and it is small: `batch_norm_`'s two per-channel arrays at 12 KiB
+a call are the largest line at 1 MiB, and every operator together is 2.5 MiB. The rest is the
+`object?[]` of value slots, the gathered mask bytes the polygon extractor copies out, and the
+boxes themselves.
+
+The number worth keeping an eye on is the first one in that stats line: **1,611 rents of 6,359
+MiB**. That is the graph's intermediate volume, and it is now pooled rather than allocated, but it
+is still 6.4 GiB of buffer traffic per detection. Most of it is width: the interpreter holds every
+integral dtype as `long`, so a twelve-million-element boolean mask is 96 MB where it could be 12.
 
 #### `ArrayPool<T>.Shared` is not the pool its reputation says
 

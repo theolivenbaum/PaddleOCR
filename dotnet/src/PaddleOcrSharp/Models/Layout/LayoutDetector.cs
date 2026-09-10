@@ -2,6 +2,8 @@ using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models.Paddle;
 using PaddleOcrSharp.Pipeline;
 
+using PaddleOcrSharp.Core;
+
 namespace PaddleOcrSharp.Models.Layout;
 
 /// <summary>
@@ -65,7 +67,30 @@ public sealed class LayoutDetector : IDisposable
 
         using RgbImage resized = OpenCvResize.ResizeBicubic(page, InputSize, InputSize);
 
-        PaddleTensor image = PaddleTensor.Float([1, 3, InputSize, InputSize]);
+        // The graph's input is built before the run, so the arena inside it never sees this one;
+        // at 800x800x3 that is 7.7 MB a detection, which was most of what the arena left behind.
+        // Rented and returned by hand instead, which is safe because the tensor does not outlive
+        // the run and nothing the run produces aliases it.
+        float[] storage = TensorPool.RentArray(3 * InputSize * InputSize);
+
+        try
+        {
+            return Detect(page, settings, resized, storage, profile);
+        }
+        finally
+        {
+            TensorPool.Return(storage);
+        }
+    }
+
+    private IReadOnlyList<LayoutBox> Detect(
+        RgbImage page,
+        LayoutOptions settings,
+        RgbImage resized,
+        float[] storage,
+        PirProfile? profile)
+    {
+        PaddleTensor image = PaddleTensor.FromFloats(storage, [1, 3, InputSize, InputSize]);
         Span<float> pixels = image.FloatSpan;
         int plane = InputSize * InputSize;
 
@@ -89,7 +114,8 @@ public sealed class LayoutDetector : IDisposable
             ["scale_factor"] = PaddleTensor.FromFloats([1f, 1f], [1, 2]),
         };
 
-        Dictionary<string, PaddleTensor> outputs = _interpreter.Run(inputs, trace: null, profile);
+        using PirRunResult run = _interpreter.RunPooled(inputs, trace: null, profile);
+        Dictionary<string, PaddleTensor> outputs = run.Outputs;
         PaddleTensor detections = outputs["fetch_name_0"];
 
         // The graph's third fetch is one mask per query. It is only read when a shape mode asks

@@ -220,11 +220,18 @@ orientation classifier.*
       both been neutral.
 - [x] `TensorPool` on `ArrayPool<T>.Shared`. Its own pool was created on a stale premise (the
       1 MiB bucket cap) and dropped every buffer past 16 of a size.
-- [ ] The arena's residual 145 MiB a detection is per-operator scaffolding — a shape array, a
-      results array and a few stride vectors, several thousand times over. `Bool` and `Int32`
-      tensors are still `long[]`, so a `[1, 300, 200, 200]` mask is 96 MB where 12 would do;
-      that is now a memory-footprint argument rather than a throughput one, since the buffers no
-      longer churn.
+- [x] The arena's residual, which was not scaffolding. `PirProfile` reports allocation per
+      operator and `PADDLEOCR_SHARP_ARENA_STATS=1` reports the arena's own accounting; between
+      them, 128 of the 145 MiB was the fetches leaving the pool a bucket short every run, and 8
+      was the input tensor built before the arena existed. `RunPooled` hands the fetch buffers
+      back on dispose and the input is rented by hand: **145 MiB -> 9 MiB**, of which 2.5 is
+      genuinely per-operator.
+- [ ] `Bool` and `Int32` tensors are still `long[]`, so a `[1, 300, 200, 200]` mask is 96 MB where
+      12 would do. With the buffers pooled this is no longer an allocation argument; it is the
+      6.4 GiB of pooled buffer traffic a detection moves, which is the next thing to attack in
+      that graph.
+- [ ] `batch_norm_` allocates two per-channel arrays per call, 1 MiB over a detection and the
+      largest operator-level line left. `LinearOps` could take them from the pool.
 - [ ] Only ~10 of the layout graph's 300 query masks survive the score threshold, and the graph
       reduces all 300. Pruning would be a semantic change to a fetched tensor, so it needs care.
 - [ ] Decode is 16% of the corpus at ~721 MB of bf16 weights per token, and the profile says it is

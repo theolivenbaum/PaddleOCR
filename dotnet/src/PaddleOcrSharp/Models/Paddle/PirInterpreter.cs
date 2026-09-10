@@ -88,7 +88,39 @@ public sealed class PirInterpreter : IDisposable
         IPirTrace? trace = null,
         PirProfile? profile = null)
     {
+        // The fetch buffers are abandoned rather than returned: this overload's caller keeps the
+        // tensors for as long as it likes. Use `RunPooled` to give them back.
+        return RunCore(inputs, trace, profile).Outputs;
+    }
+
+    /// <summary>
+    /// Runs the program and keeps the fetches' storage pooled, returning it when the result is
+    /// disposed.
+    /// </summary>
+    /// <param name="inputs">Feed tensors, keyed by the names in <see cref="InputNames"/>.</param>
+    /// <param name="trace">Optional recorder for intermediate values.</param>
+    /// <param name="profile">Optional per-operator timing accumulator.</param>
+    /// <returns>The fetches, valid until the result is disposed.</returns>
+    /// <remarks>
+    /// Every intermediate a run allocates goes back to the pool at its last use, but the fetches
+    /// cannot — they are the caller's. That leaves the pool one bucket short per fetch on every
+    /// run, and the next run allocates the shortfall again: for the layout graph's
+    /// <c>[1, 300, 200, 200]</c> mask that was 128 MiB a detection, all of what was left after
+    /// the arena landed. Callers that copy what they need out of the fetches and drop them — which
+    /// is all three of ours — should prefer this and dispose it.
+    /// </remarks>
+    public PirRunResult RunPooled(
+        IReadOnlyDictionary<string, PaddleTensor> inputs,
+        IPirTrace? trace = null,
+        PirProfile? profile = null) => RunCore(inputs, trace, profile);
+
+    private PirRunResult RunCore(
+        IReadOnlyDictionary<string, PaddleTensor> inputs,
+        IPirTrace? trace,
+        PirProfile? profile)
+    {
         var outputs = new Dictionary<string, PaddleTensor>(StringComparer.Ordinal);
+        object[] kept;
 
         // A trace keeps every intermediate alive past its last use, which is exactly what the
         // arena's accounting assumes does not happen, so a traced run allocates as it always did.
@@ -100,11 +132,12 @@ public sealed class PirInterpreter : IDisposable
         }
         finally
         {
-            // The fetches are the caller's from here; everything else goes back to the pool.
-            arena?.ReleaseAllExcept(outputs.Values);
+            // Everything but the fetches goes back to the pool here; the fetches go back when the
+            // caller disposes what it was handed.
+            kept = arena?.ReleaseAllExcept(outputs.Values) ?? [];
         }
 
-        return outputs;
+        return new PirRunResult(outputs, kept);
     }
 
     private void Evaluate(
@@ -120,6 +153,7 @@ public sealed class PirInterpreter : IDisposable
         {
             PirOperation operation = _program.Operations[index];
             long started = profile is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+            long allocated = profile is null ? 0 : GC.GetAllocatedBytesForCurrentThread();
 
             try
             {
@@ -137,6 +171,7 @@ public sealed class PirInterpreter : IDisposable
                 profile.Add(
                     operation.Name,
                     System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                    GC.GetAllocatedBytesForCurrentThread() - allocated,
                     () => Describe(operation, values));
             }
 
@@ -1005,6 +1040,34 @@ public sealed class PirInterpreter : IDisposable
 }
 
 /// <summary>
+/// The fetches of one graph run, holding their pooled storage until disposed.
+/// </summary>
+/// <remarks>
+/// Disposing returns the fetch buffers, so read what you need out of the tensors first. Nothing
+/// stops a tensor outliving the result, and its contents are whatever the next run puts there.
+/// </remarks>
+public sealed class PirRunResult : IDisposable
+{
+    private object[] _pooled;
+
+    internal PirRunResult(Dictionary<string, PaddleTensor> outputs, object[] pooled)
+    {
+        Outputs = outputs;
+        _pooled = pooled;
+    }
+
+    /// <summary>The program's fetches, keyed by fetch name.</summary>
+    public Dictionary<string, PaddleTensor> Outputs { get; }
+
+    /// <summary>Returns the fetches' storage to the pool.</summary>
+    public void Dispose()
+    {
+        TensorArena.Return(_pooled);
+        _pooled = [];
+    }
+}
+
+/// <summary>
 /// Accumulates per-operator wall-clock time, for finding the expensive part of a graph.
 /// </summary>
 public sealed class PirProfile
@@ -1014,17 +1077,19 @@ public sealed class PirProfile
     /// <summary>Records one operator's execution.</summary>
     /// <param name="name">The operator's name.</param>
     /// <param name="elapsed">How long the call took.</param>
+    /// <param name="allocatedBytes">Bytes the call allocated on the interpreter's thread.</param>
     /// <param name="describe">
     /// Describes the call's result. Invoked only when this call is the slowest seen for
     /// <paramref name="name"/>, so a profiled run does not pay to describe every operation.
     /// </param>
-    public void Add(string name, TimeSpan elapsed, Func<string>? describe = null)
+    public void Add(string name, TimeSpan elapsed, long allocatedBytes = 0, Func<string>? describe = null)
     {
         ref Entry entry = ref System.Runtime.InteropServices.CollectionsMarshal
             .GetValueRefOrAddDefault(_entries, name, out _);
 
         entry.Elapsed += elapsed;
         entry.Count++;
+        entry.Bytes += Math.Max(0, allocatedBytes);
 
         if (elapsed > entry.Slowest)
         {
@@ -1041,12 +1106,21 @@ public sealed class PirProfile
     /// <summary>Total time across every operator.</summary>
     public TimeSpan Total => _entries.Values.Aggregate(TimeSpan.Zero, (sum, entry) => sum + entry.Elapsed);
 
+    /// <summary>Per-operator allocation, largest first.</summary>
+    public IEnumerable<(string Name, long Bytes, int Count)> ByAllocation() => _entries
+        .Select(entry => (entry.Key, entry.Value.Bytes, entry.Value.Count))
+        .OrderByDescending(entry => entry.Bytes);
+
+    /// <summary>Bytes allocated across every operator.</summary>
+    public long AllocatedBytes => _entries.Values.Sum(entry => entry.Bytes);
+
     /// <summary>A human-readable table of the costliest operators.</summary>
     public string Report(int top = 15)
     {
         var builder = new System.Text.StringBuilder();
         TimeSpan total = Total;
-        builder.AppendLine($"{"operator",-20}{"total",10}{"calls",7}{"share",8}{"slowest",10}  worst call");
+        builder.AppendLine(
+            $"{"operator",-20}{"total",10}{"calls",7}{"share",8}{"slowest",10}{"alloc",10}  worst call");
 
         foreach ((string name, TimeSpan elapsed, int count) in ByCost().Take(top))
         {
@@ -1054,17 +1128,44 @@ public sealed class PirProfile
             double share = total > TimeSpan.Zero ? elapsed / total : 0;
             builder.AppendLine(
                 $"{name,-20}{elapsed.TotalMilliseconds,9:F0}ms{count,7}{share,7:P1}" +
-                $"{entry.Slowest.TotalMilliseconds,9:F0}ms  {entry.SlowestDetail}");
+                $"{entry.Slowest.TotalMilliseconds,9:F0}ms{Bytes(entry.Bytes),10}  {entry.SlowestDetail}");
         }
 
-        builder.AppendLine($"{"total",-20}{total.TotalMilliseconds,9:F0}ms");
+        builder.AppendLine(
+            $"{"total",-20}{total.TotalMilliseconds,9:F0}ms{_entries.Values.Sum(e => e.Count),7}"
+            + $"{string.Empty,8}{string.Empty,10}{Bytes(AllocatedBytes),10}");
+
+        // Allocation and time rank differently: the scaffolding a cheap operator allocates per
+        // call is invisible in the time column and adds up over thousands of calls.
+        builder.AppendLine();
+        builder.AppendLine($"{"operator",-20}{"alloc",10}{"calls",7}{"per call",11}");
+        foreach ((string name, long bytes, int count) in ByAllocation().Take(top))
+        {
+            if (bytes == 0)
+            {
+                break;
+            }
+
+            builder.AppendLine(
+                $"{name,-20}{Bytes(bytes),10}{count,7}{Bytes(bytes / Math.Max(1, count)),11}");
+        }
+
         return builder.ToString();
     }
+
+    private static string Bytes(long value) => value switch
+    {
+        >= 1L << 30 => $"{value / (double)(1L << 30):F1} GiB",
+        >= 1L << 20 => $"{value / (double)(1L << 20):F0} MiB",
+        >= 1L << 10 => $"{value / (double)(1L << 10):F0} KiB",
+        _ => $"{value} B",
+    };
 
     private struct Entry
     {
         public TimeSpan Elapsed;
         public int Count;
+        public long Bytes;
         public TimeSpan Slowest;
         public string? SlowestDetail;
     }

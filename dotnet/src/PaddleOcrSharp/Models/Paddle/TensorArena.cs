@@ -60,16 +60,38 @@ internal sealed class TensorArena : IDisposable
     private static readonly bool Poison =
         Environment.GetEnvironmentVariable("PADDLEOCR_SHARP_POISON_ARENA") == "1";
 
+    /// <summary>
+    /// Whether the arena writes a one-line summary of what it served, and from where, when a run
+    /// ends. <c>PADDLEOCR_SHARP_ARENA_STATS=1</c> turns it on.
+    /// </summary>
+    /// <remarks>
+    /// A rent that the pool cannot serve allocates, and from outside there is no way to tell one
+    /// from the other — the operator profile just shows bytes against whichever operator asked.
+    /// Measuring the allocation across each rent separates them.
+    /// </remarks>
+    private static readonly bool Stats =
+        Environment.GetEnvironmentVariable("PADDLEOCR_SHARP_ARENA_STATS") == "1";
+
+    private int _rents;
+    private int _misses;
+    private long _rentedBytes;
+    private long _missedBytes;
+    private long _returnedEarly;
+    private long _returnedAtEnd;
+    private long _keptBytes;
+
     /// <summary>Installs a new arena on this thread until it is disposed.</summary>
     internal static TensorArena Begin() => new();
 
     /// <summary>Rents float storage for at least <paramref name="count"/> elements.</summary>
     internal float[] RentFloats(int count)
     {
+        long before = Stats ? GC.GetAllocatedBytesForCurrentThread() : 0;
         float[] array = TensorPool.RentArray(count);
         if (array.Length != 0)
         {
             _rented.Add(array);
+            Record(before, (long)array.Length * sizeof(float));
             if (Poison)
             {
                 array.AsSpan(0, count).Fill(float.NaN);
@@ -82,10 +104,12 @@ internal sealed class TensorArena : IDisposable
     /// <summary>Rents long storage for at least <paramref name="count"/> elements.</summary>
     internal long[] RentLongs(int count)
     {
+        long before = Stats ? GC.GetAllocatedBytesForCurrentThread() : 0;
         long[] array = TensorPool.RentLongs(count);
         if (array.Length != 0)
         {
             _rented.Add(array);
+            Record(before, (long)array.Length * sizeof(long));
             if (Poison)
             {
                 array.AsSpan(0, count).Fill(long.MinValue);
@@ -137,26 +161,59 @@ internal sealed class TensorArena : IDisposable
     }
 
     /// <summary>
-    /// Returns every buffer still rented, except those reachable from <paramref name="keep"/>.
+    /// Returns every buffer still rented, except those reachable from <paramref name="keep"/>,
+    /// and hands those back so the caller can return them when it is finished.
     /// </summary>
     /// <param name="keep">Tensors the caller owns after the run — the graph's fetches.</param>
-    internal void ReleaseAllExcept(IEnumerable<PaddleTensor> keep)
+    /// <returns>The storage behind <paramref name="keep"/>, to pass to <see cref="Return"/>.</returns>
+    internal object[] ReleaseAllExcept(IEnumerable<PaddleTensor> keep)
     {
+        var kept = new List<object>();
+
         foreach (PaddleTensor tensor in keep)
         {
-            if (Storage(tensor) is { } storage)
+            // Two fetches can share one array; `Remove` reporting false is what keeps it out of
+            // the list twice, which would return it to the pool twice.
+            if (Storage(tensor) is { } storage && _rented.Remove(storage))
             {
-                _rented.Remove(storage);
+                _keptBytes += Size(storage);
+                kept.Add(storage);
             }
         }
 
         foreach (object array in _rented)
         {
+            _returnedAtEnd += Size(array);
             ReturnToPool(array);
         }
 
         _rented.Clear();
         _slots.Clear();
+
+        if (Stats)
+        {
+            Console.Error.WriteLine(
+                $"arena: {_rents} rents of {_rentedBytes >> 20} MiB, {_misses} missed the pool "
+                + $"({_missedBytes >> 20} MiB allocated); returned {_returnedEarly >> 20} MiB at "
+                + $"last use and {_returnedAtEnd >> 20} MiB at the end; {_keptBytes >> 20} MiB "
+                + "kept as fetches");
+        }
+
+        return [.. kept];
+    }
+
+    /// <summary>Returns buffers a previous run handed to its caller.</summary>
+    /// <param name="arrays">Storage from <see cref="ReleaseAllExcept"/>.</param>
+    /// <remarks>
+    /// Without this the fetches leave the pool one bucket short on every run, and the next run
+    /// allocates that shortfall again — 128 MiB a detection for the layout graph's mask fetch.
+    /// </remarks>
+    internal static void Return(object[] arrays)
+    {
+        foreach (object array in arrays)
+        {
+            ReturnToPool(array);
+        }
     }
 
     /// <inheritdoc />
@@ -184,8 +241,36 @@ internal sealed class TensorArena : IDisposable
 
         _slots.Remove(storage);
         _rented.Remove(storage);
+        _returnedEarly += Size(storage);
         ReturnToPool(storage);
     }
+
+    private void Record(long before, long bytes)
+    {
+        if (!Stats)
+        {
+            return;
+        }
+
+        _rents++;
+        _rentedBytes += bytes;
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        if (allocated <= 0)
+        {
+            return;
+        }
+
+        _misses++;
+        _missedBytes += allocated;
+    }
+
+    private static long Size(object array) => array switch
+    {
+        float[] floats => (long)floats.Length * sizeof(float),
+        long[] longs => (long)longs.Length * sizeof(long),
+        _ => 0,
+    };
 
     private static void ReturnToPool(object array)
     {

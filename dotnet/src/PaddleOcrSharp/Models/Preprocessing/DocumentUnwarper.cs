@@ -40,8 +40,9 @@ public sealed class DocumentUnwarper : IDisposable
             }
         }
 
-        Dictionary<string, PaddleTensor> outputs = _interpreter.Run(
+        using PirRunResult run = _interpreter.RunPooled(
             new Dictionary<string, PaddleTensor>(StringComparer.Ordinal) { ["image"] = input });
+        Dictionary<string, PaddleTensor> outputs = run.Outputs;
 
         PaddleTensor warped = outputs.Values.First();
         int height = warped.Shape[2];
