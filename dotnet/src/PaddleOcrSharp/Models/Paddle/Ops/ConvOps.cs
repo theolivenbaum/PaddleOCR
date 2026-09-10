@@ -31,6 +31,14 @@ internal static class ConvOps
     /// <c>[channel, pixel]</c> order, the layout the NCHW result already has.
     /// </para>
     /// <para>
+    /// A 1x1 convolution looks like it should skip im2col altogether — its columns are a
+    /// transpose of the input and nothing else, 382 MB of gathering a detection — and hand the
+    /// operands to <see cref="Gemm.MatMul"/>'s <c>k x n</c> form where they lie. Measured, that
+    /// is slower: conv2d 1478 -> 1686 ms. The transpose buys the reduction a contiguous axis,
+    /// and <c>Linear</c>'s four-by-four tile does sixteen multiply-adds per eight loads where
+    /// the broadcast kernel does eight per six.
+    /// </para>
+    /// <para>
     /// A block is sized to keep its columns near <see cref="ColumnBudgetBytes"/>: the panel loop
     /// re-reads the filters once per panel, so a block wants to be small enough that they stay
     /// cached, and large enough that the per-block panel widening is amortised.

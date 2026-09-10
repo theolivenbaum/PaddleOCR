@@ -20,6 +20,20 @@
     <RollForward>Major</RollForward>
   </PropertyGroup>
 
+  <!-- Every run of this tool is a cold process: it parses a document and exits, so nothing it
+       does ever reaches the steady state tiered compilation is designed for, and the first pass
+       through the layout graph and the vision tower runs as tier-0 code. Compiling optimised up
+       front instead, measured on a page: the layout stage 5061/4721 -> 3194/3262 ms and the whole
+       page 10712/10036 -> 8149/8352. The library is untouched — a long-lived host that wants
+       tiering keeps it, and DOTNET_TieredCompilation=1 overrides this for the tool.
+
+       ReadyToRun, which is the usual answer to this, measured worse on both counts (a first
+       detection of 5373/5398 ms against 4581/5014): its precompiled code is built for a
+       conservative instruction set, and this is SIMD-bound work that has to tier up anyway. -->
+  <PropertyGroup>
+    <TieredCompilation>false</TieredCompilation>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="../PaddleOcrSharp/PaddleOcrSharp.csproj" />
     <ProjectReference Include="../PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj" />
