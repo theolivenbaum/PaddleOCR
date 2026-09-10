@@ -87,6 +87,7 @@ public static class ParseCommand
                 Nms = command.GetBool("layout-nms", LayoutOptions.Default.Nms),
             },
             BlockConcurrency = command.GetInt("block-concurrency", 1),
+            Parallelism = ParallelismFrom(command),
             Profile = command.GetBool("profile", false) ? new RecognitionProfile() : null,
             StageProfile = command.GetBool("profile", false) ? new PageProfile() : null,
             LayoutProfile = command.GetBool("layout-profile", false) ? new PirProfile() : null,
@@ -190,6 +191,15 @@ public static class ParseCommand
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// The kernels' degree of parallelism, or <see langword="null"/> for one worker per core.
+    /// </summary>
+    private static ParallelOptions? ParallelismFrom(CommandLine command)
+    {
+        int degree = command.GetInt("max-parallelism", 0);
+        return degree == 0 ? null : new ParallelOptions { MaxDegreeOfParallelism = degree };
     }
 
     /// <summary>

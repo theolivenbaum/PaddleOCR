@@ -38,6 +38,10 @@ public static class Help
               --format markdown|json  Output format when writing to stdout
               --page-separator <text> Text between pages (default: a blank line)
               --block-concurrency <n> Blocks recognised in parallel (default: 1)
+              --max-parallelism <n>   Threads the kernels spread work across (default: one per
+                                      core). Independent of --block-concurrency, which decides how
+                                      many blocks run at once; the two multiply. -1 removes the cap,
+                                      which is slower here — see CLAUDE.md.
               --max-new-tokens <n>    Token budget per block (default: 8192)
               --stop-on-repetition <bool>
                                       Stop a block once its output has fallen into a verbatim
