@@ -1,3 +1,4 @@
+using PaddleOcrSharp.Core;
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>
@@ -77,47 +78,99 @@ internal static class EinsumOps
             total *= extent;
         }
 
-        int outputStride = 1;
-        int[] outputStrides = new int[all.Length];
-        for (int axis = output.Length - 1; axis >= 0; axis--)
+        // The summed axes are the tail of `all`, so each output element owns one contiguous run
+        // of the walk — which is what lets the walk be split, and lets each operand's offset be
+        // carried forward instead of recomputed from the counters for every term. The graph's one
+        // call is a 300x300 product over 256, 23 million terms, and recomputing two operands'
+        // offsets from three axes apiece for each of them cost 88 ms.
+        int outputCount = output.Length;
+        int summedTotal = 1;
+        for (int axis = outputCount; axis < all.Length; axis++)
         {
-            outputStrides[axis] = outputStride;
-            outputStride *= extents[axis];
+            summedTotal *= extents[axis];
         }
 
-        int[] counters = new int[all.Length];
-        for (int i = 0; i < total; i++)
+        int outputTotal = summedTotal == 0 ? 0 : total / Math.Max(1, summedTotal);
+        int operandCount = operands.Count;
+
+        Parallelism.Chunked(outputTotal, (from, to) =>
         {
-            double product = 1;
-            for (int operand = 0; operand < operands.Count; operand++)
+            int[] counters = new int[all.Length];
+            int[] offsets = new int[operandCount];
+
+            int remainder = from;
+            for (int axis = outputCount - 1; axis >= 0; axis--)
             {
-                int offset = 0;
-                for (int axis = 0; axis < all.Length; axis++)
+                counters[axis] = extents[axis] == 0 ? 0 : remainder % extents[axis];
+                remainder = extents[axis] == 0 ? 0 : remainder / extents[axis];
+            }
+
+            for (int o = from; o < to; o++)
+            {
+                for (int operand = 0; operand < operandCount; operand++)
                 {
-                    offset += counters[axis] * operandStrides[operand][axis];
+                    int offset = 0;
+                    for (int axis = 0; axis < outputCount; axis++)
+                    {
+                        offset += counters[axis] * operandStrides[operand][axis];
+                    }
+
+                    offsets[operand] = offset;
                 }
 
-                product *= operands[operand].GetDouble(offset);
-            }
-
-            int target = 0;
-            for (int axis = 0; axis < output.Length; axis++)
-            {
-                target += counters[axis] * outputStrides[axis];
-            }
-
-            result.Floats![target] += (float)product;
-
-            for (int axis = all.Length - 1; axis >= 0; axis--)
-            {
-                if (++counters[axis] < extents[axis])
+                for (int axis = outputCount; axis < all.Length; axis++)
                 {
-                    break;
+                    counters[axis] = 0;
                 }
 
-                counters[axis] = 0;
+                // float, term by term, in this order: the original accumulated into a zeroed
+                // float tensor, and a double accumulator here would not give the same answer.
+                float sum = 0f;
+                for (int s = 0; s < summedTotal; s++)
+                {
+                    double product = 1;
+                    for (int operand = 0; operand < operandCount; operand++)
+                    {
+                        product *= operands[operand].GetDouble(offsets[operand]);
+                    }
+
+                    sum += (float)product;
+
+                    for (int axis = all.Length - 1; axis >= outputCount; axis--)
+                    {
+                        counters[axis]++;
+                        for (int operand = 0; operand < operandCount; operand++)
+                        {
+                            offsets[operand] += operandStrides[operand][axis];
+                        }
+
+                        if (counters[axis] < extents[axis])
+                        {
+                            break;
+                        }
+
+                        for (int operand = 0; operand < operandCount; operand++)
+                        {
+                            offsets[operand] -= operandStrides[operand][axis] * extents[axis];
+                        }
+
+                        counters[axis] = 0;
+                    }
+                }
+
+                result.Floats![o] = sum;
+
+                for (int axis = outputCount - 1; axis >= 0; axis--)
+                {
+                    if (++counters[axis] < extents[axis])
+                    {
+                        break;
+                    }
+
+                    counters[axis] = 0;
+                }
             }
-        }
+        });
 
         return result;
     }
