@@ -247,3 +247,27 @@ orientation classifier.*
 - [ ] Decode is 16% of the corpus at ~721 MB of bf16 weights per token, and the profile says it is
       bandwidth-bound on streaming them. Nothing here changed it; the lever is reading fewer bytes,
       not a faster kernel.
+
+## Against a genuine PaddleX v1.6 install
+
+- [x] Build upstream's real pipeline in a venv and benchmark it page for page against the port,
+      one page per process pair, model loading excluded on both sides. Four pages: **1.16x, 2.12x,
+      4.55x**, and one page upstream did not finish inside 90 minutes twice while the port parsed
+      it in 74 s. Output identical apart from the trailing newline the port adds.
+- [x] Split each side's page between its two stages, so the end-to-end ratio stops hiding that the
+      halves go opposite ways: **the port's VL half is 1.5-2.2x faster and its layout half about
+      3x slower** (~6 s against ~2 s). The layout deficit is near-constant, so it is what makes a
+      one-block page 1.16x.
+- [x] The port rendered PDFs at 200 dpi where upstream renders at 144 (`PDFReader(zoom=2.0)` over
+      the natural 72) — 1.93x the pixels and so 1.93x the patches, on every PDF in every
+      comparison. Default is now 144: `nougat_004_scanned.pdf` 50.6 s -> 39.6 s on that alone,
+      matching upstream's output at the matched resolution.
+- [~] Do **not** move the port to fp32 to "match" upstream. Upstream is fp32 on CPU only because
+      `is_bfloat16_available` excludes CPU; the port's bf16 weight reads are half the bytes per
+      token and are most of the decode win. Matching the dtype would cost the win and change no
+      number that is compared.
+- [ ] Fold `batch_norm_` into the preceding convolution's weights at graph load. Both are affine
+      constants at inference, so the fold is exact; it removes an operator and a full pass over
+      the activation feeding it. **Unmeasured** — a candidate, not a result.
+- [ ] A direct convolution kernel for the backbone's small stride-1 shapes, where the im2col
+      column buffer plausibly costs more than the multiply-adds it feeds. **Unmeasured.**

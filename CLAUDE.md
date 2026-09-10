@@ -258,6 +258,84 @@ which is what an earlier and much less flattering comparison had accidentally fo
 column. And the machine moves: the same Python run measured 123.5 s a few days earlier against
 131.9 s here, which is why both sides are always measured in one sitting.
 
+#### Measured again, stage by stage, against a genuine PaddleX v1.6 install
+
+That table is end-to-end only, and end-to-end hides that the two halves of the pipeline go in
+opposite directions. Re-measured on a different machine (4 cores, Xeon @ 2.10 GHz) against
+`paddleocr.PaddleOCRVL(pipeline_version="v1.6", vl_rec_backend="native")` — the real wrapper over
+the real PaddleX pipeline, pointed at the same two model directories the port loads, everything
+else at upstream's defaults. One page per process pair, upstream then port back to back, so
+machine drift stays inside a pair; model loading excluded on both sides.
+
+| Page | upstream | port | |
+| --- | --- | --- | --- |
+| `ocr_test_original.png` (1 block, 672 patches) | 16.0 s | 13.8 s | 1.16x |
+| `nougat_004_scanned.pdf` (6 blocks, 4.7k patches) | 83.8 s | 39.6 s | 2.12x |
+| `code_and_formula` p1 (8 blocks, 18.5k patches) | 1016.6 s | 223.3 s | 4.55x |
+| `ocr_image.jpg` (5 blocks, one table) | did not finish in 90 min | 74.4 s | — |
+
+The markdown is identical on all three that finished, to the trailing newline the port adds and
+upstream does not, so this is again the same work in less time. `ocr_image.jpg` was given a
+90-minute budget twice and produced no page either time; it is reported as it was measured, not
+diagnosed.
+
+The ratio's spread across that table is not noise, and splitting the page says where it comes
+from. Upstream's own two stages were timed by wrapping `layout_det_model.apply` and
+`vl_rec_model.predict` in place (`__call__` on a PaddleX predictor delegates to `apply`, and a
+dunder is looked up on the type, so `apply` is the hook that sees the work); the port's come from
+`parse --profile`. Steady state, after the first page has warmed each:
+
+| Page | layout: upstream | layout: port | VL: upstream | VL: port |
+| --- | --- | --- | --- | --- |
+| `ocr_test_original.png` | 2.0 s | 6.3 s | 11.5 s | 7.5 s |
+| `nougat_004_scanned.pdf` | 1.7 s | 5.9 s | 73.3 s | 33.6 s |
+
+**The port wins the VL half by 1.5-2.2x and loses the layout half by about 3x.** Everything in the
+end-to-end table follows from those two numbers: the layout deficit is a near-constant ~4 s, so it
+is 30% of a trivial page and 2% of a heavy one, and the VL win is proportional to the work — which
+is why a one-block page comes out at 1.16x and an eight-block page at 4.55x.
+
+Two structural differences behind the VL half, both worth stating because both invite the wrong
+conclusion:
+
+- **Upstream runs the VL model in fp32 on CPU.** `is_bfloat16_available` excludes CPU, so
+  PaddleX's `doc_vlm` predictor casts the bf16 checkpoint up at load. Decoding is bandwidth-bound
+  on weight streaming, so upstream re-reads 4 bytes per parameter per token where the port reads
+  2. That kills the idea of moving the port to fp32 activations for parity — it would be a
+  divergence from upstream's *numbers* in the name of matching its *dtype*, and it would cost
+  roughly the whole decode win.
+- **Loading.** Upstream builds its pipeline in 25-57 s at ~9 GB RSS (the fp32 shadow copy above);
+  the port memory-maps the bf16 weights in 0.5-1.0 s. Excluded from every figure here, but it is
+  the difference between a pipeline you can start per page and one you cannot.
+
+And one that was simply a mistake on this side: **upstream renders PDF pages at 144 dpi**
+(`PDFReader(zoom=2.0)` over the natural 72), where the port defaulted to 200. At 200 a page
+carries 1.93x the pixels and so 1.93x the patches, so the port had been doing appreciably more
+work than upstream on every PDF in the comparison and being timed against it anyway. The default
+is now 144; `nougat_004_scanned.pdf` went from 50.6 s to 39.6 s on the change alone, and its
+output matches upstream's at the matched resolution.
+
+#### What that makes the next piece of work
+
+The layout graph, and this is the third time this document has had to move that stage's
+bottleneck. It is not a tuning gap of a few percent: ~6 s against ~2 s for the same detection, on
+the same machine, against the same weights. Upstream runs it through Paddle's inference engine
+with oneDNN behind it; the port interprets the exported PIR graph with its own kernels, and after
+the arena work that graph is `conv2d`-bound at 47.9%.
+
+Two candidates follow from that, neither of them measured yet — recorded as candidates precisely
+because this section's history is of confident guesses about this stage being wrong:
+
+- **Fold `batch_norm_` into the preceding convolution's weights when the graph is loaded.** At
+  inference both are affine and constant, so the fold is exact. It removes an operator that costs
+  11.2% together with three others *and* a full pass over the activation that produced it.
+- **A direct convolution kernel for the backbone's small stride-1 shapes**, rather than
+  materialising im2col columns for them. im2col plus GEMM is the right shape for the wide layers
+  and is what makes the tower fast; it is the small-channel early layers where the column buffer
+  costs more than the multiply-adds it feeds.
+
+Re-profile after either, rather than working down this list.
+
 Both model halves are GEMM-bound, and the shape of the win is the same in each: give the inner
 loop enough reuse that it is compute-bound rather than load-bound. `Gemm.Linear` widens a bf16
 column panel once and reuses it across every activation row; `Gemm.MatMul` tiles the output and

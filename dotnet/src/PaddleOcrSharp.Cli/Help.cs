@@ -31,7 +31,7 @@ public static class Help
               --doc-orientation       Rotate pages upright before parsing
               --doc-unwarping         Flatten curled pages before parsing
               --prompt-label <name>   Whole-page mode label when --no-layout (e.g. spotting)
-              --dpi <n>               PDF rendering resolution (default: 200)
+              --dpi <n>               PDF rendering resolution (default: 144, as upstream)
               --max-pages <n>         Stop after this many PDF pages
               --password <text>       Password for an encrypted PDF
               --output-dir <path>     Write <name>.md, <name>.json and imgs/ per page
