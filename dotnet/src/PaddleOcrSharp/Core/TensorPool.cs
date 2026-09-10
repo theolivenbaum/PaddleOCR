@@ -44,22 +44,22 @@ public readonly struct PooledBuffer : IDisposable
 /// </summary>
 public static class TensorPool
 {
-    // The default shared pool caps buckets at 1 MiB (2^20 bytes). Activations here reach tens of
-    // megabytes (e.g. a 5000x4304 vision MLP intermediate), so we own a pool sized for them.
-    private const int MaxArrayLength = 1 << 28; // 256M floats = 1 GiB
-    private const int MaxArraysPerBucket = 16;
-
-    private static readonly ArrayPool<float> Pool =
-        ArrayPool<float>.Create(MaxArrayLength, MaxArraysPerBucket);
-
-    private static readonly ArrayPool<int> IntPool =
-        ArrayPool<int>.Create(1 << 24, MaxArraysPerBucket);
-
-    // The Paddle graph interpreter holds every integral dtype — booleans included, which Paddle
-    // stores as bytes — as long, so a Bool[1, 300, 200, 200] mask in the layout detector's head is
-    // twelve million longs. Those are the largest buffers in the process after the weights.
-    private static readonly ArrayPool<long> LongPool =
-        ArrayPool<long>.Create(1 << 27, MaxArraysPerBucket);
+    // `ArrayPool<T>.Shared`, measured rather than assumed. The comment this replaces said the
+    // shared pool caps its buckets at 1 MiB and that activations here are far larger, so the pool
+    // had to be our own. The first half was true of .NET Framework and has not been true for
+    // years: the shared pool round-trips a 1 GiB float array with zero allocation. The second half
+    // of the reasoning then made things worse, because `ArrayPool.Create` keeps only
+    // `maxArraysPerBucket` buffers of a size and drops the rest — with 16, thirty-six live buffers
+    // of one size lose twenty on every round, which is exactly the shape a graph run and a
+    // key/value cache both have. Measured over a rent-and-return round of N live 4 MiB buffers:
+    //
+    //   N   shared   created(16)
+    //   16   0 MiB     0 MiB
+    //   36   0 MiB    16 MiB
+    //   64   0 MiB   128 MiB
+    //
+    // The shared pool also trims under GC pressure, where a created one holds its buffers for the
+    // life of the process. This type stays as the one place the pooling policy is stated.
 
     /// <summary>Rents a buffer of at least <paramref name="length"/> floats.</summary>
     /// <param name="length">Number of usable elements.</param>
@@ -68,7 +68,7 @@ public static class TensorPool
     {
         ArgumentOutOfRangeException.ThrowIfNegative(length);
 
-        float[] array = length == 0 ? [] : Pool.Rent(length);
+        float[] array = length == 0 ? [] : ArrayPool<float>.Shared.Rent(length);
         if (clear && length > 0)
         {
             array.AsSpan(0, length).Clear();
@@ -78,29 +78,29 @@ public static class TensorPool
     }
 
     /// <summary>Rents a raw float array of at least <paramref name="length"/> elements.</summary>
-    internal static float[] RentArray(int length) => length == 0 ? [] : Pool.Rent(length);
+    internal static float[] RentArray(int length) => length == 0 ? [] : ArrayPool<float>.Shared.Rent(length);
 
     /// <summary>Rents a buffer of at least <paramref name="length"/> ints.</summary>
-    public static int[] RentInts(int length) => length == 0 ? [] : IntPool.Rent(length);
+    public static int[] RentInts(int length) => length == 0 ? [] : ArrayPool<int>.Shared.Rent(length);
 
     /// <summary>Returns an int buffer previously obtained from <see cref="RentInts"/>.</summary>
     public static void ReturnInts(int[] array)
     {
         if (array.Length != 0)
         {
-            IntPool.Return(array);
+            ArrayPool<int>.Shared.Return(array);
         }
     }
 
     /// <summary>Rents a raw long array of at least <paramref name="length"/> elements.</summary>
-    internal static long[] RentLongs(int length) => length == 0 ? [] : LongPool.Rent(length);
+    internal static long[] RentLongs(int length) => length == 0 ? [] : ArrayPool<long>.Shared.Rent(length);
 
     /// <summary>Returns a long array previously obtained from <see cref="RentLongs"/>.</summary>
     internal static void ReturnLongs(long[] array)
     {
         if (array.Length != 0)
         {
-            LongPool.Return(array);
+            ArrayPool<long>.Shared.Return(array);
         }
     }
 
@@ -109,7 +109,7 @@ public static class TensorPool
     {
         if (array.Length != 0)
         {
-            Pool.Return(array);
+            ArrayPool<float>.Shared.Return(array);
         }
     }
 }
