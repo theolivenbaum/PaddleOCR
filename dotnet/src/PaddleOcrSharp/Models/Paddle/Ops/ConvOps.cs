@@ -1,18 +1,39 @@
+using System.Runtime.InteropServices;
 using PaddleOcrSharp.Core;
+using PaddleOcrSharp.Formats;
 
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Convolution and pooling, in NCHW layout.</summary>
 internal static class ConvOps
 {
+
     /// <summary>
     /// 2-D convolution, matching <c>pd_op.conv2d</c> and <c>pd_op.depthwise_conv2d</c>.
     /// </summary>
     /// <remarks>
-    /// Implemented as im2col followed by a GEMM per group, which keeps the inner loop a
-    /// contiguous dot product and lets the whole thing thread over output rows. Depthwise
-    /// convolutions take a direct path instead: with one channel per group, im2col would
+    /// <para>
+    /// im2col followed by <see cref="Gemm.Linear"/>, over a block of output rows at a time.
+    /// Depthwise convolutions go direct instead: with one channel per group, im2col would
     /// materialise a column buffer far larger than the work it saves.
+    /// </para>
+    /// <para>
+    /// The GEMM is the whole cost of this operator — 157 GFLOP of it in one layout detection —
+    /// so which kernel runs it decides the stage. Written the obvious way, one product per
+    /// output row through <see cref="Gemm.MatMul"/>, it measured 81 GFLOP/s against the 250 the
+    /// same machine sustains through <see cref="Gemm.Linear"/> on the vision tower's shapes. The
+    /// difference is the inner loop: <c>MatMul</c>'s <c>k × n</c> form accumulates whole output
+    /// rows in memory, one load and one store per multiply-add, where <c>Linear</c> widens a
+    /// column panel once and reduces four rows against four columns in registers. So the
+    /// convolution is posed as the shape <c>Linear</c> wants — filters as the activation rows,
+    /// the im2col columns as the weight panel — which also lands the product in
+    /// <c>[channel, pixel]</c> order, the layout the NCHW result already has.
+    /// </para>
+    /// <para>
+    /// A block is sized to keep its columns near <see cref="ColumnBudgetBytes"/>: the panel loop
+    /// re-reads the filters once per panel, so a block wants to be small enough that they stay
+    /// cached, and large enough that the per-block panel widening is amortised.
+    /// </para>
     /// </remarks>
     public static PaddleTensor Conv2d(
         PaddleTensor input,
@@ -70,67 +91,86 @@ internal static class ConvOps
         int inGroupChannels = inChannels / groups;
         int outGroupChannels = outChannels / groups;
         int patch = inGroupChannels * kernelHeight * kernelWidth;
+        int plane = outHeight * outWidth;
 
-        ReadOnlySpan<float> weights = weight.FloatSpan;
         float[] weightArray = weight.Floats!;
+
+        // Rows per block, from the column budget: one row of columns is outWidth * patch floats.
+        int rowBytes = outWidth * patch * sizeof(float);
+        int blockRows = Math.Clamp(ColumnBudgetBytes / Math.Max(1, rowBytes), 1, outHeight);
+
+        int columnCount = blockRows * outWidth * patch;
+        int tileCount = outGroupChannels * blockRows * outWidth;
+
+        // Bytes rather than floats: the columns are written as floats and read by the GEMM as a
+        // weight matrix, which is a view over bytes, and renting them this way keeps that view
+        // free of a copy.
+        byte[] columnBytes = TensorPool.RentBytes(columnCount * sizeof(float));
+        columnBytes.AsSpan(0, columnCount * sizeof(float)).Clear();
+        using PooledBuffer tile = TensorPool.Rent(tileCount);
 
         for (int n = 0; n < batch; n++)
         {
             for (int g = 0; g < groups; g++)
             {
                 int inputBase = ((n * inChannels) + (g * inGroupChannels)) * inHeight * inWidth;
-                int outputBase = ((n * outChannels) + (g * outGroupChannels)) * outHeight * outWidth;
+                int outputBase = ((n * outChannels) + (g * outGroupChannels)) * plane;
                 int weightBase = g * outGroupChannels * patch;
 
-                // Each output row is one GEMM: the filters (outGroupChannels x patch) against the
-                // row's im2col columns, which are stored outWidth x patch and so play the part of
-                // a transposed right-hand operand. Doing it a column at a time instead would
-                // stream the whole filter matrix past for every output pixel.
-                int tileCount = outGroupChannels * outWidth;
-                int columnCount = outWidth * patch;
-
-                Parallel.For(0, outHeight, Parallelism.Options, () => TensorPool.Rent(columnCount + tileCount), (oy, _, scratch) =>
+                for (int rowStart = 0; rowStart < outHeight; rowStart += blockRows)
                 {
-                    Span<float> columns = scratch.Span[..columnCount];
-                    Im2ColRow(
+                    int rows = Math.Min(blockRows, outHeight - rowStart);
+                    int pixels = rows * outWidth;
+
+                    Im2ColBlock(
                         input.Floats!, inputBase, inGroupChannels, inHeight, inWidth,
                         kernelHeight, kernelWidth, strides, dilations, padTop, padLeft,
-                        oy, outWidth, columns);
+                        rowStart, rows, outWidth, patch, columnBytes);
 
-                    Gemm.MatMul(
+                    // y[outGroupChannels, pixels] = filters[outGroupChannels, patch]
+                    //                             · columnsᵀ[patch, pixels]
+                    Gemm.Linear(
                         weightArray.AsMemory(weightBase, outGroupChannels * patch),
                         outGroupChannels,
                         patch,
-                        transposeA: false,
-                        scratch.Memory[..columnCount],
-                        outWidth,
-                        transposeB: true,
-                        scratch.Memory.Slice(columnCount, tileCount),
-                        allowParallel: false);
+                        WeightMatrix.Create(
+                            columnBytes.AsMemory(0, pixels * patch * sizeof(float)),
+                            DType.Float32,
+                            pixels,
+                            patch),
+                        ReadOnlyMemory<float>.Empty,
+                        tile.Memory[..(outGroupChannels * pixels)],
+                        pixels);
 
-                    // The product is channel-major; the output plane is too, but with the whole
-                    // feature map between consecutive channels.
-                    Span<float> tile = scratch.Span.Slice(columnCount, tileCount);
-                    int planeStride = outHeight * outWidth;
-                    int rowOffset = outputBase + (oy * outWidth);
-
+                    // Each output channel's block is one contiguous run of the result plane.
                     for (int oc = 0; oc < outGroupChannels; oc++)
                     {
-                        tile.Slice(oc * outWidth, outWidth)
-                            .CopyTo(result.Floats.AsSpan(rowOffset + (oc * planeStride), outWidth));
+                        tile.Span.Slice(oc * pixels, pixels).CopyTo(
+                            result.Floats.AsSpan(outputBase + (oc * plane) + (rowStart * outWidth), pixels));
                     }
-
-                    return scratch;
-                },
-                scratch => scratch.Dispose());
+                }
             }
         }
 
-        _ = weights;
+        TensorPool.ReturnBytes(columnBytes);
         return result;
     }
 
-    private static void Im2ColRow(
+    /// <summary>Columns budget for one block of output rows, before the GEMM runs over it.</summary>
+    private const int ColumnBudgetBytes = 16 << 20;
+
+    /// <summary>
+    /// Fills a block of output rows' im2col columns, laid out <c>pixel x patch</c> — the row-major
+    /// <c>[n, k]</c> form <see cref="Gemm.Linear"/> reads its weight panel in.
+    /// </summary>
+    /// <remarks>
+    /// The buffer is zeroed once, when it is rented, and the positions a tap skips because it
+    /// falls outside the image are left alone rather than rewritten: whether a tap is in range
+    /// depends on the output pixel and the tap, both of which this fill visits exactly once per
+    /// block, so a skipped position is simply one this fill never writes. What the previous block
+    /// left there is the problem instead, so a skipped position is cleared as it is passed.
+    /// </remarks>
+    private static void Im2ColBlock(
         float[] input,
         int inputBase,
         int channels,
@@ -142,41 +182,84 @@ internal static class ConvOps
         int[] dilations,
         int padTop,
         int padLeft,
-        int outY,
+        int rowStart,
+        int rows,
         int outWidth,
-        Span<float> columns)
+        int patch,
+        byte[] columns)
     {
-        int patch = channels * kernelHeight * kernelWidth;
-        columns[..(outWidth * patch)].Clear();
+        int strideY = strides[0];
+        int strideX = strides[1];
+        int dilationY = dilations[0];
+        int dilationX = dilations[1];
 
-        for (int c = 0; c < channels; c++)
+        // Threaded over the block's rows: this fill is 2.1 GB of stores over a detection, and the
+        // GEMM that follows spreads itself, so leaving the fill serial hands the stage back
+        // whatever the GEMM saves.
+        FillRows(
+            input, inputBase, channels, inHeight, inWidth,
+            kernelHeight, kernelWidth, strideY, strideX, dilationY, dilationX, padTop, padLeft,
+            rowStart, rows, outWidth, patch, columns);
+    }
+
+    /// <summary>The body of <see cref="Im2ColBlock"/>, one output row at a time.</summary>
+    /// <remarks>
+    /// Separate so the lambda's display class is allocated only where it is used —
+    /// <see cref="Conv2d"/> runs ninety times over a layout graph.
+    /// </remarks>
+    private static void FillRows(
+        float[] input,
+        int inputBase,
+        int channels,
+        int inHeight,
+        int inWidth,
+        int kernelHeight,
+        int kernelWidth,
+        int strideY,
+        int strideX,
+        int dilationY,
+        int dilationX,
+        int padTop,
+        int padLeft,
+        int rowStart,
+        int rows,
+        int outWidth,
+        int patch,
+        byte[] columns)
+    {
+        int rowFloats = outWidth * patch;
+
+        Parallel.For(0, rows, Parallelism.Options, r =>
         {
-            int channelBase = inputBase + (c * inHeight * inWidth);
-            for (int ky = 0; ky < kernelHeight; ky++)
+            int outY = rowStart + r;
+            Span<float> rowColumns = MemoryMarshal.Cast<byte, float>(
+                columns.AsSpan(r * rowFloats * sizeof(float), rowFloats * sizeof(float)));
+
+            for (int c = 0; c < channels; c++)
             {
-                int iy = (outY * strides[0]) - padTop + (ky * dilations[0]);
-                if ((uint)iy >= (uint)inHeight)
+                int channelBase = inputBase + (c * inHeight * inWidth);
+                for (int ky = 0; ky < kernelHeight; ky++)
                 {
-                    continue;
-                }
+                    int iy = (outY * strideY) - padTop + (ky * dilationY);
+                    int tapBase = ((c * kernelHeight) + ky) * kernelWidth;
+                    bool inRange = (uint)iy < (uint)inHeight;
+                    int rowBase = channelBase + (iy * inWidth);
 
-                int rowBase = channelBase + (iy * inWidth);
-                for (int kx = 0; kx < kernelWidth; kx++)
-                {
-                    int patchOffset = (((c * kernelHeight) + ky) * kernelWidth) + kx;
-                    int start = -padLeft + (kx * dilations[1]);
-
-                    for (int ox = 0; ox < outWidth; ox++)
+                    for (int kx = 0; kx < kernelWidth; kx++)
                     {
-                        int ix = start + (ox * strides[1]);
-                        if ((uint)ix < (uint)inWidth)
+                        int offset = tapBase + kx;
+                        int start = -padLeft + (kx * dilationX);
+
+                        for (int ox = 0; ox < outWidth; ox++)
                         {
-                            columns[(ox * patch) + patchOffset] = input[rowBase + ix];
+                            int ix = start + (ox * strideX);
+                            rowColumns[(ox * patch) + offset] =
+                                inRange && (uint)ix < (uint)inWidth ? input[rowBase + ix] : 0f;
                         }
                     }
                 }
             }
-        }
+        });
     }
 
     private static void Depthwise(

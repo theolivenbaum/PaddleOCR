@@ -80,6 +80,25 @@ public static class TensorPool
     /// <summary>Rents a raw float array of at least <paramref name="length"/> elements.</summary>
     internal static float[] RentArray(int length) => length == 0 ? [] : ArrayPool<float>.Shared.Rent(length);
 
+    /// <summary>Rents a raw byte buffer of at least <paramref name="length"/> bytes.</summary>
+    /// <remarks>
+    /// For a buffer that has to be read as bytes as well as written as floats — a
+    /// a weight matrix over pooled storage, which is how the
+    /// convolution hands its im2col columns to <see cref="Gemm.Linear"/> without copying them.
+    /// </remarks>
+    /// <param name="length">Number of usable bytes.</param>
+    public static byte[] RentBytes(int length) => length == 0 ? [] : ArrayPool<byte>.Shared.Rent(length);
+
+    /// <summary>Returns a byte buffer previously obtained from <see cref="RentBytes"/>.</summary>
+    /// <param name="array">The buffer to return.</param>
+    public static void ReturnBytes(byte[] array)
+    {
+        if (array.Length != 0)
+        {
+            ArrayPool<byte>.Shared.Return(array);
+        }
+    }
+
     /// <summary>Rents a buffer of at least <paramref name="length"/> ints.</summary>
     public static int[] RentInts(int length) => length == 0 ? [] : ArrayPool<int>.Shared.Rent(length);
 
