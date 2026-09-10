@@ -486,10 +486,35 @@ detections**, against 13.4 GiB for the same three before the arena. The effect i
 the pool accumulates the buckets a corpus needs and stops growing. A page parsed in a process of
 its own still pays the cold ~1 GiB and nothing else, which is what the per-page corpus runs show.
 
-The number worth keeping an eye on is the first one in that stats line: **1,611 rents of 6,359
-MiB**. That is the graph's intermediate volume, and it is now pooled rather than allocated, but it
-is still 6.4 GiB of buffer traffic per detection. Most of it is width: the interpreter holds every
-integral dtype as `long`, so a twelve-million-element boolean mask is 96 MB where it could be 12.
+The stats line's first figure is the graph's intermediate volume — **1,611 rents of 6,359 MiB** a
+detection, pooled now rather than allocated. The obvious next move from there is to stop holding
+every integral dtype as `long`, since a twelve-million-element boolean mask is then 96 MB where it
+could be 12. **That is the wrong move, and the same stats line says so once it splits by storage:**
+
+```
+arena: by storage — float 5431 MiB, integral 928 MiB
+```
+
+Integral storage is 15% of the traffic. Narrowing it to a byte would take 928 MiB to about 116,
+which is 13% of the total — and the operators that touch those tensors are no longer where the
+time is either. Post-arena the graph is **`conv2d`-bound**:
+
+| Operator | Share of a 4.05 s detection |
+| --- | --- |
+| `conv2d` | **47.9%** |
+| `matmul`, `transpose`, `add` (deformable attention) | 17.5% |
+| the mask head's `cast`, `where`, `multiply`, `greater_than`, `any` | 11.7% |
+| `batch_norm_`, `depthwise_conv2d`, `concat`, `relu` | 11.2% |
+
+So the whole boolean-width question is worth at most half of 11.7% of a stage that is 8% of a
+page, against a change to the interpreter's storage model and the byte-exactness every parity
+check rests on. The convolutions are where the remaining work in this graph is, and they are
+honest im2col-plus-GEMM work of the kind the tower's attention turned out to be.
+
+That is the second time this section has claimed to know where the layout graph's time goes and
+been wrong — first the element-wise mask kernels, then the allocation, now the convolutions. The
+pattern is that each fix moved the bottleneck somewhere the previous profile could not see it, so
+**re-profile after every change to this graph rather than working down a stale list.**
 
 #### `ArrayPool<T>.Shared` is not the pool its reputation says
 

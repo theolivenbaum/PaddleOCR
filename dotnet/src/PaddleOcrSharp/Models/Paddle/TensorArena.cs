@@ -76,6 +76,8 @@ internal sealed class TensorArena : IDisposable
     private int _misses;
     private long _rentedBytes;
     private long _missedBytes;
+    private long _floatBytes;
+    private long _longBytes;
     private long _returnedEarly;
     private long _returnedAtEnd;
     private long _keptBytes;
@@ -91,6 +93,7 @@ internal sealed class TensorArena : IDisposable
         if (array.Length != 0)
         {
             _rented.Add(array);
+            _floatBytes += (long)array.Length * sizeof(float);
             Record(before, (long)array.Length * sizeof(float));
             if (Poison)
             {
@@ -109,6 +112,7 @@ internal sealed class TensorArena : IDisposable
         if (array.Length != 0)
         {
             _rented.Add(array);
+            _longBytes += (long)array.Length * sizeof(long);
             Record(before, (long)array.Length * sizeof(long));
             if (Poison)
             {
@@ -197,6 +201,8 @@ internal sealed class TensorArena : IDisposable
                 + $"({_missedBytes >> 20} MiB allocated); returned {_returnedEarly >> 20} MiB at "
                 + $"last use and {_returnedAtEnd >> 20} MiB at the end; {_keptBytes >> 20} MiB "
                 + "kept as fetches");
+            Console.Error.WriteLine(
+                $"arena: by storage — float {_floatBytes >> 20} MiB, integral {_longBytes >> 20} MiB");
         }
 
         return [.. kept];

@@ -228,10 +228,18 @@ orientation classifier.*
       genuinely per-operator. End to end, three pages in one process allocate 1.6 GiB of layout
       against 13.4 GiB before the arena; the gap to the bench's 9 MiB is the graph's
       content-dependent shapes asking for buckets the pool has not got yet.
-- [ ] `Bool` and `Int32` tensors are still `long[]`, so a `[1, 300, 200, 200]` mask is 96 MB where
-      12 would do. With the buffers pooled this is no longer an allocation argument; it is the
-      6.4 GiB of pooled buffer traffic a detection moves, which is the next thing to attack in
-      that graph.
+- [~] `Bool` and `Int32` tensors are still `long[]`. **Measured and not worth doing**: the arena's
+      by-storage line puts integral storage at 928 MiB of the 6,359 MiB a detection moves (15%),
+      and post-arena the operators that touch those tensors are 11.7% of the graph's time. Upper
+      bound on the whole exercise is ~6% of a stage that is 8% of a page. The blast radius is
+      small (9 files, ~85 call sites, most reads already funnelled through `GetLong`) — it is the
+      payoff that is missing, not the feasibility.
+- [ ] `conv2d` is 47.9% of a post-arena detection, and deformable attention's `matmul` +
+      `transpose` + `add` another 17.5%. That is where this graph's remaining time is. Both are
+      im2col-plus-GEMM shapes, so the levers are the ones that worked on the vision tower.
+- [ ] Re-profile after every change to this graph. Three times now a fix has moved the bottleneck
+      somewhere the previous profile could not see: element-wise kernels, then allocation, now the
+      convolutions.
 - [ ] `batch_norm_` allocates two per-channel arrays per call, 1 MiB over a detection and the
       largest operator-level line left. `LinearOps` could take them from the pool.
 - [ ] Only ~10 of the layout graph's 300 query masks survive the score threshold, and the graph
