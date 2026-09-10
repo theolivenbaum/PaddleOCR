@@ -225,7 +225,9 @@ orientation classifier.*
       them, 128 of the 145 MiB was the fetches leaving the pool a bucket short every run, and 8
       was the input tensor built before the arena existed. `RunPooled` hands the fetch buffers
       back on dispose and the input is rented by hand: **145 MiB -> 9 MiB**, of which 2.5 is
-      genuinely per-operator.
+      genuinely per-operator. End to end, three pages in one process allocate 1.6 GiB of layout
+      against 13.4 GiB before the arena; the gap to the bench's 9 MiB is the graph's
+      content-dependent shapes asking for buckets the pool has not got yet.
 - [ ] `Bool` and `Int32` tensors are still `long[]`, so a `[1, 300, 200, 200]` mask is 96 MB where
       12 would do. With the buffers pooled this is no longer an allocation argument; it is the
       6.4 GiB of pooled buffer traffic a detection moves, which is the next thing to attack in

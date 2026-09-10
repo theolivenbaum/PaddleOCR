@@ -478,6 +478,14 @@ a call are the largest line at 1 MiB, and every operator together is 2.5 MiB. Th
 `object?[]` of value slots, the gathered mask bytes the polygon extractor copies out, and the
 boxes themselves.
 
+Those figures are the bench's, which feeds the same input every iteration. A real document is less
+tidy, because the graph has content-dependent shapes — what `top_k` selects and what the gathers
+index are functions of the page — so a new page can ask for a bucket the pool has not got yet.
+Three pages of `multi_page_scanned.pdf` in one process allocate **1.6 GiB across three
+detections**, against 13.4 GiB for the same three before the arena. The effect is self-limiting:
+the pool accumulates the buckets a corpus needs and stops growing. A page parsed in a process of
+its own still pays the cold ~1 GiB and nothing else, which is what the per-page corpus runs show.
+
 The number worth keeping an eye on is the first one in that stats line: **1,611 rents of 6,359
 MiB**. That is the graph's intermediate volume, and it is now pooled rather than allocated, but it
 is still 6.4 GiB of buffer traffic per detection. Most of it is width: the interpreter holds every
