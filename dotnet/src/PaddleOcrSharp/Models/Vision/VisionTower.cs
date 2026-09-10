@@ -207,8 +207,11 @@ public sealed class VisionTower
 
             using (profile?.Measure("attention"))
             {
+                // The parts are recorded from inside, as thread-ticks: attention runs a thread
+                // per head, so nothing outside it can see where its time went.
                 Attention.Bidirectional(
-                    queries.Memory, keys.Memory, values.Memory, attention.Memory, heads, tokens, headDim, scale);
+                    queries.Memory, keys.Memory, values.Memory, attention.Memory,
+                    heads, tokens, headDim, scale, profile);
             }
 
             using (profile?.Measure("rope+split"))

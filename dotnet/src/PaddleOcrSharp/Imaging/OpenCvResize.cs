@@ -1,3 +1,5 @@
+using PaddleOcrSharp.Core;
+
 namespace PaddleOcrSharp.Imaging;
 
 /// <summary>
@@ -46,7 +48,7 @@ public static class OpenCvResize
         int sourceWidth = source.Width;
         int sourceHeight = source.Height;
 
-        Parallel.For(0, height, () => new float[4 * width * channels], (oy, _, rows) =>
+        Parallel.For(0, height, Parallelism.Options, () => new float[4 * width * channels], (oy, _, rows) =>
         {
             // Horizontal pass for the four source rows this output row needs.
             for (int k = 0; k < 4; k++)

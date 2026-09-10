@@ -17,6 +17,7 @@ namespace PaddleOcrSharp.Models.Vision;
 public sealed class StageProfile
 {
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Lock _gate = new();
 
     /// <summary>Starts timing a stage; dispose the result to record it.</summary>
     /// <param name="name">Stage name, aggregated across every call.</param>
@@ -27,11 +28,37 @@ public sealed class StageProfile
     /// <param name="elapsed">How long it took.</param>
     public void Add(string name, TimeSpan elapsed)
     {
-        ref Entry entry = ref System.Runtime.InteropServices.CollectionsMarshal
-            .GetValueRefOrAddDefault(_entries, name, out _);
+        lock (_gate)
+        {
+            ref Entry entry = ref System.Runtime.InteropServices.CollectionsMarshal
+                .GetValueRefOrAddDefault(_entries, name, out _);
 
-        entry.Elapsed += elapsed;
-        entry.Count++;
+            entry.Elapsed += elapsed;
+            entry.Count++;
+        }
+    }
+
+    /// <summary>Records a stage measured as a tick count, summed across worker threads.</summary>
+    /// <param name="name">Stage name.</param>
+    /// <param name="ticks">Stopwatch ticks spent inside it, summed over every thread.</param>
+    /// <param name="calls">How many calls those ticks cover.</param>
+    /// <remarks>
+    /// A stage that runs on several threads at once cannot be timed by wall clock from inside, so
+    /// attention's parts each accumulate their own thread's ticks and are folded in here. The
+    /// figure is therefore thread-seconds, not wall seconds: over a stage that keeps every core
+    /// busy the two agree closely enough to compare the parts against each other, which is what
+    /// this is for.
+    /// </remarks>
+    public void AddThreadTicks(string name, long ticks, int calls)
+    {
+        lock (_gate)
+        {
+            ref Entry entry = ref System.Runtime.InteropServices.CollectionsMarshal
+                .GetValueRefOrAddDefault(_entries, name, out _);
+
+            entry.Elapsed += Stopwatch.GetElapsedTime(0, ticks);
+            entry.Count += calls;
+        }
     }
 
     /// <summary>Renders the stages, slowest first.</summary>

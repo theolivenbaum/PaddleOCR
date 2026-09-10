@@ -1,3 +1,5 @@
+using PaddleOcrSharp.Core;
+
 namespace PaddleOcrSharp.Models.Paddle.Ops;
 
 /// <summary>Resampling kernels: grid sampling and interpolation.</summary>
@@ -43,7 +45,7 @@ internal static class SamplingOps
             _ => throw new NotSupportedException($"grid_sample mode '{mode}' is not supported."),
         };
 
-        Parallel.For(0, batch * outHeight, index =>
+        Parallel.For(0, batch * outHeight, Parallelism.Options, index =>
         {
             int n = index / outHeight;
             int oy = index % outHeight;
@@ -179,7 +181,7 @@ internal static class SamplingOps
             ? (float)(inWidth - 1) / (outWidth - 1)
             : (float)inWidth / outWidth;
 
-        Parallel.For(0, batch * channels, plane =>
+        Parallel.For(0, batch * channels, Parallelism.Options, plane =>
         {
             int inputBase = plane * inHeight * inWidth;
             int outputBase = plane * outHeight * outWidth;
@@ -253,7 +255,7 @@ internal static class SamplingOps
             ? (float)(inWidth - 1) / (outWidth - 1)
             : (float)inWidth / outWidth;
 
-        Parallel.For(0, batch * channels, plane =>
+        Parallel.For(0, batch * channels, Parallelism.Options, plane =>
         {
             int inputBase = plane * inHeight * inWidth;
             int outputBase = plane * outHeight * outWidth;

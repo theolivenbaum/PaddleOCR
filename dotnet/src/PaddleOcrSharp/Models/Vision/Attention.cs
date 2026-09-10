@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using PaddleOcrSharp.Core;
 
 namespace PaddleOcrSharp.Models.Vision;
@@ -24,6 +25,10 @@ public static class Attention
     /// <param name="tokens">Sequence length.</param>
     /// <param name="headDim">Width of one head.</param>
     /// <param name="scale">Softmax scale, normally <c>1 / sqrt(headDim)</c>.</param>
+    /// <param name="profile">
+    /// Receives the parts' cost when supplied. Attention runs a thread per head, so nothing
+    /// outside it can attribute its time; each thread accumulates its own and they are summed.
+    /// </param>
     public static void Bidirectional(
         ReadOnlyMemory<float> queries,
         ReadOnlyMemory<float> keys,
@@ -32,13 +37,16 @@ public static class Attention
         int heads,
         int tokens,
         int headDim,
-        float scale)
+        float scale,
+        StageProfile? profile = null)
     {
         // Wide enough that a block amortises the key and value traffic, narrow enough that the
         // scores stay well inside L2 (16 x 5120 floats is 320 KB at the largest page we accept).
         const int Block = 16;
 
-        Parallel.For(0, heads, head =>
+        long transposeTicks = 0, scoreTicks = 0, softmaxTicks = 0, valueTicks = 0;
+
+        Parallel.For(0, heads, Parallelism.Options, head =>
         {
             int headOffset = head * tokens * headDim;
 
@@ -48,24 +56,31 @@ public static class Attention
             using PooledBuffer buffer = TensorPool.Rent(Block * tokens);
             Memory<float> scores = buffer.Memory;
 
+            // One transpose of this head's keys serves every row-block below, of which there are
+            // `tokens / Block`. See AttentionKernels for why the score product wants them this
+            // way round.
+            using PooledBuffer keysT = TensorPool.Rent(tokens * headDim);
+            long mark = Stopwatch.GetTimestamp();
+            AttentionKernels.TransposeHead(k.Span, tokens, headDim, keysT.Span);
+            long transpose = Stopwatch.GetTimestamp() - mark;
+            long score = 0, soft = 0, value = 0;
+
             for (int start = 0; start < tokens; start += Block)
             {
                 int rows = Math.Min(Block, tokens - start);
                 Memory<float> block = scores[..(rows * tokens)];
 
-                // Keys are the reduction vectors, so the score block is a product against a
-                // transposed right-hand operand.
-                Gemm.MatMul(
-                    queries.Slice(headOffset + (start * headDim), rows * headDim),
+                mark = Stopwatch.GetTimestamp();
+                AttentionKernels.Scores(
+                    queries.Span.Slice(headOffset + (start * headDim), rows * headDim),
                     rows,
                     headDim,
-                    transposeA: false,
-                    k,
+                    keysT.Span,
                     tokens,
-                    transposeB: true,
-                    block,
-                    allowParallel: false);
+                    block.Span);
+                score += Stopwatch.GetTimestamp() - mark;
 
+                mark = Stopwatch.GetTimestamp();
                 Span<float> rowsSpan = block.Span;
                 for (int row = 0; row < rows; row++)
                 {
@@ -74,19 +89,34 @@ public static class Attention
                     Kernels.Softmax(scoreRow);
                 }
 
-                // Values are indexed by key, which is the reduction axis here, so this one is a
-                // direct product — no transpose of the values needed.
-                Gemm.MatMul(
-                    block,
+                soft += Stopwatch.GetTimestamp() - mark;
+                mark = Stopwatch.GetTimestamp();
+
+                AttentionKernels.Values(
+                    block.Span,
                     rows,
                     tokens,
-                    transposeA: false,
-                    v,
+                    v.Span,
                     headDim,
-                    transposeB: false,
-                    output.Slice(headOffset + (start * headDim), rows * headDim),
-                    allowParallel: false);
+                    output.Span.Slice(headOffset + (start * headDim), rows * headDim));
+                value += Stopwatch.GetTimestamp() - mark;
+            }
+
+            if (profile is not null)
+            {
+                Interlocked.Add(ref transposeTicks, transpose);
+                Interlocked.Add(ref scoreTicks, score);
+                Interlocked.Add(ref softmaxTicks, soft);
+                Interlocked.Add(ref valueTicks, value);
             }
         });
+
+        if (profile is not null)
+        {
+            profile.AddThreadTicks("attention transpose", transposeTicks, heads);
+            profile.AddThreadTicks("attention scores", scoreTicks, heads);
+            profile.AddThreadTicks("attention softmax", softmaxTicks, heads);
+            profile.AddThreadTicks("attention values", valueTicks, heads);
+        }
     }
 }
