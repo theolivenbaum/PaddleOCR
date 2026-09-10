@@ -202,3 +202,48 @@ orientation classifier.*
       closed. The Paddle operator kernels are `internal` — nothing outside the interpreter used
       them. The rest of the surface stays public on purpose: this port is meant to be inspectable
       stage by stage, which is also how the parity tests reach it.
+
+## Performance — measured on the scanned corpus
+
+- [x] `PageProfile`: per-stage wall time and allocations for everything outside the model call,
+      printed by `parse --profile`; `--layout-profile` adds the layout graph's operators
+- [x] Attention records its own parts from inside, as thread-ticks, since it threads over heads
+- [x] Cap `Parallel.For` at the core count everywhere (`Core/Parallelism.cs`)
+- [x] Attention score product: transposed keys, four rows by two column vectors, token block
+      outermost
+- [x] Attention value product: chunked reduction with the output tile in registers
+- [x] Baseline and after, six pages of `pdf_scanned` + `images/ocr_*`, one page each
+- [x] The layout graph allocated 4.5 GiB per detection. `TensorArena` pools the interpreter's
+      intermediates against an exact per-array count of the value slots referencing them:
+      **4,458 MiB and 7.5 s a detection become 145 MiB and 4.7 s**. The allocation was the
+      binding constraint, which is why vectorising the broadcast fallback and tuning the GC had
+      both been neutral.
+- [x] `TensorPool` on `ArrayPool<T>.Shared`. Its own pool was created on a stale premise (the
+      1 MiB bucket cap) and dropped every buffer past 16 of a size.
+- [x] The arena's residual, which was not scaffolding. `PirProfile` reports allocation per
+      operator and `PADDLEOCR_SHARP_ARENA_STATS=1` reports the arena's own accounting; between
+      them, 128 of the 145 MiB was the fetches leaving the pool a bucket short every run, and 8
+      was the input tensor built before the arena existed. `RunPooled` hands the fetch buffers
+      back on dispose and the input is rented by hand: **145 MiB -> 9 MiB**, of which 2.5 is
+      genuinely per-operator. End to end, three pages in one process allocate 1.6 GiB of layout
+      against 13.4 GiB before the arena; the gap to the bench's 9 MiB is the graph's
+      content-dependent shapes asking for buckets the pool has not got yet.
+- [~] `Bool` and `Int32` tensors are still `long[]`. **Measured and not worth doing**: the arena's
+      by-storage line puts integral storage at 928 MiB of the 6,359 MiB a detection moves (15%),
+      and post-arena the operators that touch those tensors are 11.7% of the graph's time. Upper
+      bound on the whole exercise is ~6% of a stage that is 8% of a page. The blast radius is
+      small (9 files, ~85 call sites, most reads already funnelled through `GetLong`) — it is the
+      payoff that is missing, not the feasibility.
+- [ ] `conv2d` is 47.9% of a post-arena detection, and deformable attention's `matmul` +
+      `transpose` + `add` another 17.5%. That is where this graph's remaining time is. Both are
+      im2col-plus-GEMM shapes, so the levers are the ones that worked on the vision tower.
+- [ ] Re-profile after every change to this graph. Three times now a fix has moved the bottleneck
+      somewhere the previous profile could not see: element-wise kernels, then allocation, now the
+      convolutions.
+- [ ] `batch_norm_` allocates two per-channel arrays per call, 1 MiB over a detection and the
+      largest operator-level line left. `LinearOps` could take them from the pool.
+- [ ] Only ~10 of the layout graph's 300 query masks survive the score threshold, and the graph
+      reduces all 300. Pruning would be a semantic change to a fetched tensor, so it needs care.
+- [ ] Decode is 16% of the corpus at ~721 MB of bf16 weights per token, and the profile says it is
+      bandwidth-bound on streaming them. Nothing here changed it; the lever is reading fewer bytes,
+      not a faster kernel.

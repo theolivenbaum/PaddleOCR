@@ -1,5 +1,7 @@
 using System.Buffers;
 
+using PaddleOcrSharp.Core;
+
 namespace PaddleOcrSharp.Imaging;
 
 /// <summary>
@@ -181,7 +183,7 @@ public static class PilResize
         int height = source.Height;
         int outWidth = destination.Width;
 
-        Parallel.For(0, height, y =>
+        Parallel.For(0, height, Parallelism.Options, y =>
         {
             ReadOnlySpan<byte> srcRow = source.Row(y);
             Span<byte> dstRow = destination.Row(y);
@@ -221,7 +223,7 @@ public static class PilResize
         int width = destination.Width;
         int outHeight = destination.Height;
 
-        Parallel.For(0, outHeight, y =>
+        Parallel.For(0, outHeight, Parallelism.Options, y =>
         {
             int min = bounds[(y * 2) + 0];
             int count = bounds[(y * 2) + 1];

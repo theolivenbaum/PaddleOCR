@@ -215,7 +215,13 @@ public sealed class ModelDownloader : IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
-                return null;
+                // Not every static mirror answers HEAD: an R2 or S3 bucket published through a
+                // worker often allows only GET, PUT and DELETE and replies 405 here. A one-byte
+                // ranged GET carries the same three facts in its Content-Range, so the probe
+                // falls back to that rather than reporting the file unreachable.
+                return response.StatusCode is HttpStatusCode.MethodNotAllowed or HttpStatusCode.Forbidden
+                    ? await ProbeByRangeAsync(url, cancellationToken).ConfigureAwait(false)
+                    : null;
             }
 
             // A static mirror publishes no content digest: an S3-compatible ETag is an MD5
@@ -229,6 +235,49 @@ public sealed class ModelDownloader : IDisposable
                 response.Content.Headers.ContentLength,
                 etag,
                 response.Headers.AcceptRanges.Contains("bytes"));
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Asks for the first byte of <paramref name="url"/> and reads the file's facts out of the
+    /// <c>Content-Range</c> the server answers with. Used when the mirror rejects <c>HEAD</c>.
+    /// </summary>
+    private async Task<RemoteFileInfo?> ProbeByRangeAsync(string url, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Range = new RangeHeaderValue(0, 0);
+
+            using HttpResponseMessage response = await _client
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            EntityTagHeaderValue? etag = response.Headers.ETag is { IsWeak: false } strong ? strong : null;
+
+            // 206 means the range was honoured, so the total length is in Content-Range and the
+            // server does support ranges whether or not it also advertises Accept-Ranges. A 200
+            // means it ignored the range and sent the whole body, which Content-Length then
+            // describes; resuming against such a server is not safe.
+            if (response.StatusCode == HttpStatusCode.PartialContent)
+            {
+                return new RemoteFileInfo(response.Content.Headers.ContentRange?.Length, etag, SupportsRange: true);
+            }
+
+            return new RemoteFileInfo(response.Content.Headers.ContentLength, etag, SupportsRange: false);
         }
         catch (HttpRequestException)
         {

@@ -52,8 +52,9 @@ public sealed class DocOrientationClassifier : IDisposable
             }
         }
 
-        Dictionary<string, PaddleTensor> outputs = _interpreter.Run(
+        using PirRunResult run = _interpreter.RunPooled(
             new Dictionary<string, PaddleTensor>(StringComparer.Ordinal) { ["x"] = input });
+        Dictionary<string, PaddleTensor> outputs = run.Outputs;
 
         PaddleTensor logits = outputs.Values.First();
         Span<float> scores = logits.FloatSpan;

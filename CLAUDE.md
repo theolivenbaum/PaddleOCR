@@ -155,6 +155,10 @@ SkiaSharp's resampler matches neither and is used only for decoding and encoding
   allocates its display class on entry, whichever branch runs, so a hot method with a parallel
   and a serial path must keep the lambda in a separate method. That one detail was 437 KiB per
   vision attention layer.
+- **Pool through `ArrayPool<T>.Shared`.** It pools buffers up to a gigabyte — the widely repeated
+  1 MiB bucket cap is .NET Framework folklore — and it keeps every buffer of a size where
+  `ArrayPool.Create` drops everything past `maxArraysPerBucket`. `TensorPool` is the one place that
+  policy is stated. Measure the shared pool before adding another.
 - **Weights stay in their on-disk dtype** (bf16) so a 0.9B model does not need a 4 GB float32
   shadow copy. The GEMM widens one column panel at a time and reuses it across every activation
   row; widening inside the inner loop instead costs more than the multiply-adds it feeds.
@@ -199,6 +203,36 @@ Measured on 4 cores at ~3 GHz, a 980x392 page (1960 patches).
 | Decoder (503-token prefill + 32 tokens) | ~3.6 s |
 | Layout graph | ~7.6 s |
 
+### A whole page, including the stages no profile covered
+
+`PageProfile` (printed by `parse --profile` beside the block table) names the rest: rasterise,
+decode, layout, crop, stack, table-figures, prepare, recognize, encode-figure, otsl-to-html,
+assemble, render. It exists because those three profiles between them left a hole — on a short
+scanned page `parse --profile` reported 6.2 s of recognition inside a 20.7 s page and said nothing
+about the other 14.5 s. `--layout-profile` adds the layout graph's own operator breakdown.
+
+Over six pages of `test_documents/pdf_scanned` and `images/ocr_*`, one page each:
+
+| Stage | Share of the corpus |
+| --- | --- |
+| vision tower | 67.5% |
+| decode | 16.0% |
+| layout graph | 8.3% |
+| prefill | 8.1% |
+| everything else | 0.2% |
+
+**Scanned documents invert the picture the rest of this section was written against.** There, two
+runaway decodes were 95% of a page; here the tower is two thirds of the corpus and decode is a
+sixth. Dense scanned text gives every block a near-maximal patch count and almost nothing to say:
+one block reached 4,840 patches and generated 258 tokens. The consequence for tuning is that
+attention's share is not a constant — it is quadratic in patches where every other stage is
+linear, so 36% at 1960 patches is 65% at 4900.
+
+The same table settles two smaller questions. The pipeline's own image work — cropping, masking,
+stacking, the markup conversions — is 0.2% of a page and is not worth attention. And one layout
+detection allocated 4.5 GiB, which turned out to be the largest single thing wrong with the port;
+see below.
+
 ### Against the original
 
 The port is faster than the pipeline it was ported from. Running upstream's own
@@ -234,8 +268,9 @@ its im2col columns rather than a dot product per output pixel.
 The layout graph is not GEMM-bound, and for a while it was not bound by anything defensible. The
 mask head works on `[1, 300, 200, 200]` tensors — twelve million elements — and its casts,
 comparisons and fills ran element at a time. Vectorising them took the stage from 9.3 s to 7.6 s
-with `conv2d` flat as a control, and moved the convolutions from a fifth of the graph to a third,
-which is where the remaining work is.
+with `conv2d` flat as a control, and moved the convolutions from a fifth of the graph to a third.
+What was actually left, though, was neither: the graph was allocation-bound, and pooling its
+intermediates took it from 7.5 s to 4.7 s — see "Where the allocations go".
 
 `PirProfile` (printed by `bench`) reports each operator's total, its slowest single call, and that
 call's result shape and Paddle module path. The shape column is what makes the layout graph's cost
@@ -371,67 +406,207 @@ what changed is which arbitrary reduction, because the truncator takes a differe
 shorter string. On the corpus's character-accuracy metric that costs 0.4 points of mean, all of it
 on that one page.
 
+### Where the allocations go
+
+A stage that allocates a lot is not automatically slow, so this is worth separating from the
+timings above. Two of the three big allocators turned out to be fine and the third was the
+layout graph's whole problem.
+
+| Stage | Per call, before | After |
+| --- | --- | --- |
+| layout detection | 4,458 MiB, every time | 1,038 MiB cold, then **145 MiB** |
+| vision tower | 411 MiB cold | 4 MiB per steady pass |
+| decoder prefill | 154 MiB cold | 3 MiB per steady pass |
+
+The tower and the decoder were already pooled; their cold figures are the pool filling, which is
+why the per-block column of `RecognitionProfile` shows one large block at 672 MiB and the next
+identical one at 67. Reading those as a leak is a mistake worth naming, because it sends you
+looking in the wrong half of the pipeline.
+
+**The layout graph was allocation-bound.** `TensorArena` gives a run's intermediate tensors pooled
+storage, and what makes that safe is knowing when a buffer is really dead — a tensor's array is
+not its own, since `reshape`, `cast` between same-width dtypes and `share_data_` all return a
+tensor over an existing array. The arena counts, per array, how many of the interpreter's value
+slots reference it, and returns the array at zero. The interpreter is the only place a run's
+tensors live and every operator's results land in slots it names, so the count is exact.
+Interleaved against the control at constant load, four detections in one process: **4,458 MiB and
+7.5 s per detection become 145 MiB and 4.7 s**.
+
+That result is also the answer to two experiments in the list below that came out neutral. Neither
+vectorising the graph's element-wise fallback nor taking the collector off a core did anything,
+because neither addressed the allocation.
+
+Pooling a buffer that a fresh allocation would have zeroed is a real hazard:
+`GC.AllocateUninitializedArray` of this size arrives zeroed in practice, so an operator that read
+its own output before writing it would have been quietly correct and would now produce garbage.
+`PADDLEOCR_SHARP_POISON_ARENA=1` fills every rented buffer with `NaN` and `long.MinValue` first;
+the corpus is byte-identical with it on, which is what says no operator does that.
+
+The 145 MiB that remained was not scaffolding, which is what it looked like. `PirProfile` now
+reports allocation per operator beside the timings, and it put 128 of the 145 against a single
+operator — so the guess that it was a shape array and a results array per operator, several
+thousand times over, was wrong twice: wrong about the shape, and describing something that adds up
+to 2.5 MiB.
+
+`TensorArena` reports its own accounting under `PADDLEOCR_SHARP_ARENA_STATS=1`, which is what
+identified it. Per detection, steady state:
+
+```
+arena: 1611 rents of 6359 MiB, 3 missed the pool (0 MiB allocated); returned 6231 MiB at
+last use and 0 MiB at the end; 128 MiB kept as fetches
+```
+
+**The 128 MiB was the fetches.** A run's intermediates all go back at their last use, but its
+fetches cannot — they are the caller's. So each run took a bucket's worth of buffers out of
+circulation and the next run allocated the shortfall again, and for a `[1, 300, 200, 200]` mask
+that is 128 MiB a page in perpetuity. `RunPooled` returns a `PirRunResult` that gives those
+buffers back when disposed; all three callers copy what they need out of the fetches and drop
+them, so all three use it.
+
+A further 8 MiB was the graph's *input* tensor, built before the run and so never seen by the
+arena inside it. Rented and returned by hand.
+
+| | per detection |
+| --- | --- |
+| before the arena | 4,458 MiB |
+| arena | 145 MiB |
+| fetches returned to the pool | 17 MiB |
+| input tensor rented | **9 MiB** |
+
+What is left is the scaffolding, and it is small: `batch_norm_`'s two per-channel arrays at 12 KiB
+a call are the largest line at 1 MiB, and every operator together is 2.5 MiB. The rest is the
+`object?[]` of value slots, the gathered mask bytes the polygon extractor copies out, and the
+boxes themselves.
+
+Those figures are the bench's, which feeds the same input every iteration. A real document is less
+tidy, because the graph has content-dependent shapes — what `top_k` selects and what the gathers
+index are functions of the page — so a new page can ask for a bucket the pool has not got yet.
+Three pages of `multi_page_scanned.pdf` in one process allocate **1.6 GiB across three
+detections**, against 13.4 GiB for the same three before the arena. The effect is self-limiting:
+the pool accumulates the buckets a corpus needs and stops growing. A page parsed in a process of
+its own still pays the cold ~1 GiB and nothing else, which is what the per-page corpus runs show.
+
+The stats line's first figure is the graph's intermediate volume — **1,611 rents of 6,359 MiB** a
+detection, pooled now rather than allocated. The obvious next move from there is to stop holding
+every integral dtype as `long`, since a twelve-million-element boolean mask is then 96 MB where it
+could be 12. **That is the wrong move, and the same stats line says so once it splits by storage:**
+
+```
+arena: by storage — float 5431 MiB, integral 928 MiB
+```
+
+Integral storage is 15% of the traffic. Narrowing it to a byte would take 928 MiB to about 116,
+which is 13% of the total — and the operators that touch those tensors are no longer where the
+time is either. Post-arena the graph is **`conv2d`-bound**:
+
+| Operator | Share of a 4.05 s detection |
+| --- | --- |
+| `conv2d` | **47.9%** |
+| `matmul`, `transpose`, `add` (deformable attention) | 17.5% |
+| the mask head's `cast`, `where`, `multiply`, `greater_than`, `any` | 11.7% |
+| `batch_norm_`, `depthwise_conv2d`, `concat`, `relu` | 11.2% |
+
+So the whole boolean-width question is worth at most half of 11.7% of a stage that is 8% of a
+page, against a change to the interpreter's storage model and the byte-exactness every parity
+check rests on. The convolutions are where the remaining work in this graph is, and they are
+honest im2col-plus-GEMM work of the kind the tower's attention turned out to be.
+
+That is the second time this section has claimed to know where the layout graph's time goes and
+been wrong — first the element-wise mask kernels, then the allocation, now the convolutions. The
+pattern is that each fix moved the bottleneck somewhere the previous profile could not see it, so
+**re-profile after every change to this graph rather than working down a stale list.**
+
+#### `ArrayPool<T>.Shared` is not the pool its reputation says
+
+`TensorPool` existed because "the default shared pool caps buckets at 1 MiB (2^20 bytes)". That
+was true of .NET Framework and has not been true for years. Measured, the shared pool round-trips
+a **1 GiB** float array with zero allocation, at every size from 1 MiB up.
+
+Believing it made things worse rather than neutral, because `ArrayPool.Create(_,
+maxArraysPerBucket)` keeps only that many buffers of a size and drops the rest, where the shared
+pool keeps them. Over a rent-and-return round of N live 4 MiB buffers:
+
+| N | shared | created(16) |
+| --- | --- | --- |
+| 16 | 0 MiB | 0 MiB |
+| 36 | 0 MiB | 16 MiB |
+| 64 | 0 MiB | 128 MiB |
+
+Thirty-six of one size is exactly what `KvCache` holds, two per layer, and one growth at the
+decoder's geometry is 576 MiB — so a cache on a created pool would churn 66 MiB per block where
+the shared pool churns nothing. `KvCacheTests` pins it. **Before adding a pool of your own here,
+measure the shared one.**
+
 ### Where the vision tower's time goes
 
 `bench` prints a stage profile for the tower (`StageProfile`, the hand-written towers' answer to
-`PirProfile`). For the same 980x392 page:
+`PirProfile`), and attention now records its own parts from inside — it runs a thread per head, so
+nothing outside it can attribute its time. Each thread accumulates its own and they are summed, so
+the figures are thread-seconds; over a stage that keeps every core busy that is what makes the
+parts comparable with each other.
+
+At the 4900-patch page a scanned block actually produces, before the work below:
 
 | Stage | Share | GFLOP/s |
 | --- | --- | --- |
-| attention | 36% | 60 |
-| MLP matrix products | 37% | 130 |
-| QKV projections | 15% | 121 |
-| output projection | 5% | 122 |
-| rotary + head shuffles, GELU, norms, residuals | 7% | |
+| attention | 65.5% | 73 |
+| MLP matrix products | 19.6% | 215 |
+| QKV projections | 7.9% | |
+| output projection | 2.7% | |
+| rotary + head shuffles, GELU, norms, residuals | 4.3% | |
 
-The rate column is what makes attention's share legible: it carries under a quarter of the tower's
-arithmetic, and until the change below it ran at 50 GFLOP/s where every other product in the same
-run reached 120-130, against a machine ceiling of 227 across four threads.
+The rate column is the whole argument: attention carried more arithmetic than the MLP products and
+ran at a third of their rate, on the same machine, against a measured all-thread FMA ceiling of
+285 GFLOP/s.
 
-Attention carries under a quarter of the tower's arithmetic and takes nearly half its time. Its two
-products and the softmax between them can be timed separately, one thread per head, at the shape
-the tower issues (16 query rows against 1960 tokens, head dimension 72):
+Four changes took it from 40.8 s to 25.1 s, each A/B'd in one sitting with the untouched stages as
+controls:
 
-| | one thread | four threads | share of attention |
+| | attention | scores | values |
 | --- | --- | --- | --- |
-| score product (`Q·Kᵀ`) | 18.4 GF/s | 58 GF/s | 40% |
-| value product (`P·V`) | 17.8 GF/s | 52 GF/s | 52% |
-| scale + softmax | | | 8% |
+| before | 40.8 s | | |
+| parallelism capped at the core count | 36.6 s | 150.2 ms | 169.4 ms |
+| transposed keys | 36.6 s | 128.4 ms | 169.4 ms |
+| chunked value reduction | 29.1 s | 128.4 ms | 96.1 ms |
+| token block outermost | **25.1 s** | **98.2 ms** | **96.1 ms** |
 
-Three things that says, none of them the first guess:
+- **The degree of parallelism was unbounded.** `Parallel.For`'s default lets the pool inject
+  workers while a queue stays non-empty, which is a policy for work that blocks. None of this
+  blocks, and attention holds megabytes per worker at this page size, so the extra threads divided
+  the cache and added switches. The instrumentation said so directly: the thread-time sum was 6.8x
+  the stage's wall time on a four-core machine, and capping it took that to 3.89x. `Parallelism`
+  now holds one shared `ParallelOptions` for every kernel that spreads work.
+- **The score product reduces over 72 columns**, so the general kernel finishes every output with
+  a lane reduction, and its four accumulators cannot fill two FMA ports at four cycles of latency.
+  Transposing each head's keys to `[headDim][tokens]` makes the lanes output columns: the tile
+  becomes four query rows by two column vectors — eight chains, six loads per eight multiply-adds.
+  One transpose per head per layer against the `tokens / 16` passes the product makes over them.
+- **That is the experiment recorded below as neutral**, and it was: with six or seven threads on
+  four cores the stage was contention-bound and no kernel change could show through it. Both
+  measurements were right, which is worth remembering before dismissing a mechanism twice.
+- **The score kernel's loop order.** A tile of transposed keys is 4.6 KB and the block's row groups
+  sweep it from L1; row group outermost instead read the head's whole 1.4 MB key matrix once per
+  group.
+- **The value product was store-bound.** It kept its output rows in memory and streamed the values
+  past them, so the loop-carried dependency was a store and a reload of every output element on
+  every one of 4900 reduction steps — one store per multiply-add, against a single store port —
+  and it swept the values once per group of four output rows. Chunking the reduction at 80 tokens
+  puts the output tile in registers for the chunk and keeps the chunk's values in L1 across the
+  tiles that sweep it. The chunk is sized for L1 deliberately: sized for L2 the kernel simply
+  becomes L2-bound and gains nothing.
 
-- **The value product is the larger half**, not the score product. Both carry identical FLOPs, so
-  the split is entirely kernel efficiency.
-- **The softmax is 8%**, so its four passes over each score row are not where to look.
-- **Parallel scaling is fine** — about 3x on four threads, against the 2.53x the machine's own FMA
-  measurement scales by. The gap is single-thread kernel efficiency against an 89.6 GF/s ceiling,
-  not threading.
+End to end on `code_and_formula_scanned.pdf` page 1 — blocks up to 4,840 patches — bracketed by two
+control runs in the same sitting: **vision 200.6 s -> 160.0 s (-20%), the page 270.0 s -> 230.1 s
+(-15%)**, with layout, prefill and decode flat and the markdown byte-identical.
 
-What the score product spends is the **horizontal sum**, one per output element. Reducing along the
-head's 72 columns is nine multiply-adds followed by a ~10-cycle lane reduction, and that ratio is
-fixed no matter how the tile is shaped: `Dot4` finishes four outputs with four lane reductions per
-36 multiply-adds, `Dot4x4` sixteen with sixteen per 144 — the same 0.111 either way, which is why
-substituting one for the other changes nothing at all. Getting past it means not reducing along the
-lanes: hold the keys transposed, `[headDim][tokens]`, so the lanes are output columns and the
-reduction is an ordinary accumulation. In the isolated kernel benchmark that is **18.4 → 25
-GF/s** — and in the tower it is worth nothing at all, which is recorded below.
+The win scales with block size, because attention's share does. On pages whose blocks are 600-800
+patches the same build measures within noise of the control, and the corpus splits accordingly:
+-20% of vision where blocks approach the pixel budget, ~0% where they are a seventh of it.
 
-What the value product spent was **indexing**. Its inner kernel accumulates one scaled right-hand
-row into four destination rows, so five spans are indexed per iteration — one source and two per
-destination — which is nine bounds compares for four multiply-adds, and the reduction axis is the
-token count, so it runs thousands of times for one 16x72 tile. Taking a reference per span once and
-stepping it, with the accumulate inlined into the reduction so the loop pays neither a span
-construction nor a call per term, is **17.8 GF/s against 14.2**, and byte-for-byte the same
-arithmetic in the same order. Measured on the tower: **attention 9,462 ms → 7,948 ms (−16%)** and
-the whole tower 23,636 ms → 21,954 ms, with the untouched stages inside their ±3% noise as the
-control and four pages byte-identical.
-
-Key and value traffic is not the limit, which was the first guess and has now been ruled out three
-separate ways: every row-block re-reads this head's keys and values 123 times over at the
-sixteen-row block used, and sizing the block from the token count so that halves made no measurable
-difference; nor did hoisting the reduction outermost so the value matrix is read once per block
-rather than once per row group; nor did holding the output tile in registers, which cost 15% by
-breaking the single streaming pass over that matrix.
+Two earlier notes in this section are superseded rather than wrong. The isolated kernel rates
+(18.4 and 17.8 GFLOP/s) were measured under the uncapped pool, and the reasoning that the score
+product's lane reduction is "the cost whatever the tile" holds only while the tile keeps reducing
+along the lanes — the point of transposing is to stop.
 
 ### Things that looked like wins and were not
 
@@ -460,15 +635,46 @@ the argument for them is still convincing on paper, and someone will otherwise t
 - **Holding the value product's output tile in registers**, four rows by sixteen columns. A 15%
   loss: covering 64 columns then takes four passes over the value matrix, each touching a quarter
   of every row, which trades one streaming pass for four strided ones.
-- **Transposing each head's keys so the score product never reduces along the vector lanes.** The
-  argument is the one above and it is sound: the isolated kernel goes from 18.4 to 25 GF/s with the
-  lane reduction gone. In the tower it measured 7,955 ms against 7,948 ms — neutral to the last
-  digit — for a per-head 564 KB buffer, a transpose of every head's keys on every layer, and a
-  second kernel to maintain. Reverted. Worth adding to the microbenchmark traps below: the harness
-  timed the kernel but not the transpose that feeds it, and ran it over the whole token axis in one
-  go where `Gemm.MatMul` tiles the columns at 455. A kernel benchmark that does not pay the
-  preparation its caller pays, in the tile its caller uses, will happily promise a win the caller
-  cannot collect.
+- **Transposing each head's keys so the score product never reduces along the vector lanes.**
+  Measured neutral in the tower — 7,955 ms against 7,948 ms — and reverted. **This one was later
+  re-measured and kept**: see the section above. The stage was contention-bound at the time, with
+  six or seven pool threads on four cores, and no kernel change could show through that. The
+  measurement was correct and the conclusion drawn from it was not, which is the trap worth
+  keeping: a stage that is bound by something other than its kernel will report every kernel
+  change as neutral, so establish what a stage is bound by before A/B-ing its inner loop.
+- **Vectorising the layout graph's broadcast fallback.** Each element-wise kernel has fast paths
+  for the contiguous shapes and a per-element delegate through `double` for everything else, and
+  the mask head lives in that everything else: `[1, 300, 200, 200]` against `[1, 300, 1, 1]`
+  broadcasts over the *leading* dimensions, so twelve million elements each paid two delegate calls
+  and two conversions, and the operator moved 410 MB/s where the machine reads at 10 GB/s. A
+  general plan — take the longest suffix of dimensions over which every operand is contiguous or
+  constant, hand that suffix to the same vector kernels, walk the rest with a counter — covers
+  every shape and removes the delegate entirely. Neutral: five warm layout runs measured 6.7-7.7 s
+  against the control's 6.3-8.7 s, and a page measured 10.5-11.7 s against 11.7-12.3 s. Per-operator
+  timings swung ±25-120% on operators the change never touched, which is what says the graph is not
+  where its own profile appears to put it. Reverted, with the vectorised `Widen`, `Narrow` and
+  `Truncate` conversions that went with it. **The reason is now known**: the graph was
+  allocation-bound, and pooling its intermediates was worth 37% where the arithmetic was worth
+  nothing.
+- **Turning off background GC**, on the argument that a collector thread is a fourth claimant on
+  four cores while the layout graph churns 4.5 GiB of large tensors. First measured as 8.3-9.0 s
+  against 5.6-6.1 s over five warm layout runs, which is a large clean-looking separation and was
+  entirely an ordering artefact: the configurations ran in sequence, and the whole sequence drifts
+  downward as the 125 MB of layout weights settle into the page cache. Interleaved — on, off, on,
+  off — the warm medians are 5.12, 5.27, 5.19, 5.32 s. **Interleave the configurations, or the
+  first one measured pays for the page cache the others inherit.** The premise was half right and
+  aimed at the wrong half: the churn was the problem, but the answer was to stop churning rather
+  than to collect it faster.
+- **Pooling `RgbImage`'s buffers through a pool sized past the shared one's supposed cap.** The
+  premise was the stale cap above, so the change was pointless; worse, routing `Clone` through it
+  rounds each image up to a power of two, and on a page's handful of differently-sized crops that
+  cold-pool slack costs more than it saves — `stack` measured 35 MiB against the control's 20.
+  Reverted. Images are a few tens of MiB a page against a gigabyte for the rest, so there was
+  little to win either way.
+- **Moving `KvCache` off `ArrayPool<T>.Shared`.** Same stale premise, and the measurement is the
+  other way round: 0 MiB a round on the shared pool against 66-130 MiB on a created one. Reverted,
+  and a test now pins it. The one thing worth keeping from the exercise is the shape of the mistake
+  — a diagnosis inherited from a comment, acted on without measuring the thing the comment claimed.
 - **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
   60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
   GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit

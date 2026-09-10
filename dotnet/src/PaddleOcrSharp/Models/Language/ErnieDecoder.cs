@@ -249,6 +249,7 @@ public sealed class ErnieDecoder
         Parallel.For(
             0,
             queryHeads * tokenCount,
+            Parallelism.Options,
             () => TensorPool.Rent(visible),
             (index, _, scores) =>
             {

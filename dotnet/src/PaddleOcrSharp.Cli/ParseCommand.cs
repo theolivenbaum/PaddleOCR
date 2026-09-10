@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
 using PaddleOcrSharp.Models.Layout;
+using PaddleOcrSharp.Models.Paddle;
 using PaddleOcrSharp.Pdf;
 using PaddleOcrSharp.Pipeline;
 
@@ -87,6 +88,8 @@ public static class ParseCommand
             },
             BlockConcurrency = command.GetInt("block-concurrency", 1),
             Profile = command.GetBool("profile", false) ? new RecognitionProfile() : null,
+            StageProfile = command.GetBool("profile", false) ? new PageProfile() : null,
+            LayoutProfile = command.GetBool("layout-profile", false) ? new PirProfile() : null,
             Generation = GenerationOptions.Default with
             {
                 MaxNewTokens = command.GetInt("max-new-tokens", GenerationOptions.Default.MaxNewTokens),
@@ -109,6 +112,7 @@ public static class ParseCommand
             modelDirectory, layoutDirectory, orientationDirectory, unwarpingDirectory);
         Console.Error.WriteLine($"Models loaded in {clock.Elapsed.TotalSeconds:F1}s");
         RecognitionProfile? profile = options.Profile;
+        PageProfile? stages = options.StageProfile;
 
         string? outputDirectory = command.Get("output-dir");
         if (outputDirectory is not null)
@@ -123,7 +127,8 @@ public static class ParseCommand
 
         foreach (string path in command.Positional)
         {
-            foreach ((RgbImage image, string label) in LoadPages(path, dpi, maxPages, command.Get("password")))
+            foreach ((RgbImage image, string label) in LoadPages(
+                path, dpi, maxPages, command.Get("password"), stages))
             {
                 using (image)
                 {
@@ -151,19 +156,37 @@ public static class ParseCommand
         if (outputDirectory is null)
         {
             string format = command.Get("format", "markdown")!;
-            var document = Restructure(new ParsedDocument(pages), command);
-            Console.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
-                ? ToJson(
-                    document.Pages,
-                    options.MarkdownSettings,
-                    command.GetBool("format-block-content", false))
-                : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!));
+            string text;
+            using (stages?.Measure("render"))
+            {
+                var document = Restructure(new ParsedDocument(pages), command);
+                text = format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                    ? ToJson(
+                        document.Pages,
+                        options.MarkdownSettings,
+                        command.GetBool("format-block-content", false))
+                    : document.ToMarkdown(options.MarkdownSettings, command.Get("page-separator", "\n\n")!);
+            }
+
+            Console.WriteLine(text);
         }
 
         if (profile is not null)
         {
             Console.Error.WriteLine();
             Console.Error.WriteLine(profile.ToString());
+        }
+
+        if (stages is not null)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(stages.ToString());
+        }
+
+        if (options.LayoutProfile is { } layoutProfile)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(layoutProfile.Report(25));
         }
 
         return 0;
@@ -176,20 +199,44 @@ public static class ParseCommand
         string path,
         int dpi,
         int maxPages,
-        string? password)
+        string? password,
+        PageProfile? stages)
     {
         string stem = Path.GetFileNameWithoutExtension(path);
 
         if (!Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
         {
-            yield return (ImageIO.Load(path), stem);
+            RgbImage decoded;
+            using (stages?.Measure("decode"))
+            {
+                decoded = ImageIO.Load(path);
+            }
+
+            yield return (decoded, stem);
             yield break;
         }
 
+        // The rasteriser is lazy, so the page it yields is rendered as the enumerator advances.
+        // Measuring the MoveNext rather than the whole loop is what keeps the render out of the
+        // recognition it is interleaved with.
         int index = 0;
-        foreach (RgbImage page in PdfRasterizer.Render(path, dpi, password, maxPages))
+        using IEnumerator<RgbImage> rendered = PdfRasterizer.Render(path, dpi, password, maxPages)
+            .GetEnumerator();
+
+        while (true)
         {
-            yield return (page, $"{stem}_page{index + 1:D3}");
+            bool moved;
+            using (stages?.Measure("rasterize"))
+            {
+                moved = rendered.MoveNext();
+            }
+
+            if (!moved)
+            {
+                break;
+            }
+
+            yield return (rendered.Current, $"{stem}_page{index + 1:D3}");
             index++;
         }
     }

@@ -60,17 +60,40 @@ public sealed class PaddleTensor
     /// Allocates a float tensor whose contents are undefined.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Intermediate tensors in a graph are always written in full by the operator that produces
     /// them, and zeroing them first is not free: a single <c>[1, 256, 200, 200]</c> feature map is
     /// 41 MB, and a layout forward pass produces hundreds of them. Use <see cref="Zeros(int[],
     /// PaddleDType)"/> for the few operators that accumulate into their output.
+    /// </para>
+    /// <para>
+    /// "Undefined" is now literal. A run inside a <see cref="TensorArena"/> takes its storage from
+    /// a pool, so a buffer arrives holding whatever the last tensor of that size left in it, where
+    /// a fresh allocation of this size happened to arrive zeroed. An operator that leaned on that
+    /// by accident was correct before and is not now, which is why the arena landed against a
+    /// byte-for-byte comparison of the corpus.
+    /// </para>
     /// </remarks>
-    public static PaddleTensor Float(int[] shape, PaddleDType dtype = PaddleDType.Float32) =>
-        new(dtype, shape, GC.AllocateUninitializedArray<float>(ElementCount(shape)), null);
+    public static PaddleTensor Float(int[] shape, PaddleDType dtype = PaddleDType.Float32)
+    {
+        int count = ElementCount(shape);
+        return new(
+            dtype,
+            shape,
+            TensorArena.Current?.RentFloats(count) ?? GC.AllocateUninitializedArray<float>(count),
+            null);
+    }
 
     /// <summary>Allocates an integer tensor whose contents are undefined.</summary>
-    public static PaddleTensor Int(int[] shape, PaddleDType dtype = PaddleDType.Int64) =>
-        new(dtype, shape, null, GC.AllocateUninitializedArray<long>(ElementCount(shape)));
+    public static PaddleTensor Int(int[] shape, PaddleDType dtype = PaddleDType.Int64)
+    {
+        int count = ElementCount(shape);
+        return new(
+            dtype,
+            shape,
+            null,
+            TensorArena.Current?.RentLongs(count) ?? GC.AllocateUninitializedArray<long>(count));
+    }
 
     /// <summary>Allocates a tensor of the given dtype whose contents are undefined.</summary>
     public static PaddleTensor Allocate(int[] shape, PaddleDType dtype) =>

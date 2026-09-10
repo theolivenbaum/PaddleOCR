@@ -89,7 +89,7 @@ internal static class ConvOps
                 int tileCount = outGroupChannels * outWidth;
                 int columnCount = outWidth * patch;
 
-                Parallel.For(0, outHeight, () => TensorPool.Rent(columnCount + tileCount), (oy, _, scratch) =>
+                Parallel.For(0, outHeight, Parallelism.Options, () => TensorPool.Rent(columnCount + tileCount), (oy, _, scratch) =>
                 {
                     Span<float> columns = scratch.Span[..columnCount];
                     Im2ColRow(
@@ -201,7 +201,7 @@ internal static class ConvOps
         float[] destination = result.Floats!;
         int kernelSize = kernelHeight * kernelWidth;
 
-        Parallel.For(0, batch * channels, index =>
+        Parallel.For(0, batch * channels, Parallelism.Options, index =>
         {
             int n = index / channels;
             int c = index % channels;
@@ -287,7 +287,7 @@ internal static class ConvOps
         float[] destination = result.Floats!;
         bool isMax = poolingType == "max";
 
-        Parallel.For(0, batch * channels, index =>
+        Parallel.For(0, batch * channels, Parallelism.Options, index =>
         {
             int inputBase = index * inHeight * inWidth;
             int outputBase = index * outHeight * outWidth;
@@ -356,7 +356,7 @@ internal static class ConvOps
         float[] destination = result.Floats!;
         bool isMax = poolingType == "max";
 
-        Parallel.For(0, batch * channels, index =>
+        Parallel.For(0, batch * channels, Parallelism.Options, index =>
         {
             int inputBase = index * inHeight * inWidth;
             int outputBase = index * outHeight * outWidth;

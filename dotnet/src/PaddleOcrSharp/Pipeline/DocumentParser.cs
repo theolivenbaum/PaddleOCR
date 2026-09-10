@@ -81,19 +81,29 @@ public sealed class DocumentParser : IDisposable
         CancellationToken cancellationToken = default)
     {
         DocumentParserOptions settings = options ?? DocumentParserOptions.Default;
+        using PageProfile.Scope whole = settings.StageProfile?.Measure("page") ?? default;
 
         RgbImage? prepared = null;
         try
         {
             if (settings.UseDocOrientationClassify && _orientation is not null)
             {
-                prepared = _orientation.Correct(page);
+                using (settings.StageProfile?.Measure("orientation"))
+                {
+                    prepared = _orientation.Correct(page);
+                }
+
                 page = prepared;
             }
 
             if (settings.UseDocUnwarping && _unwarper is not null)
             {
-                RgbImage flattened = _unwarper.Unwarp(page);
+                RgbImage flattened;
+                using (settings.StageProfile?.Measure("unwarp"))
+                {
+                    flattened = _unwarper.Unwarp(page);
+                }
+
                 prepared?.Dispose();
                 prepared = flattened;
                 page = flattened;
@@ -114,9 +124,15 @@ public sealed class DocumentParser : IDisposable
         IProgress<BlockProgress>? progress,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<LayoutBox> detected = settings.UseLayoutDetection && _layout is not null
-            ? _layout.Detect(page, settings.Layout)
-            : [WholePage(page, settings.WholePageLabel)];
+        PageProfile? stages = settings.StageProfile;
+
+        IReadOnlyList<LayoutBox> detected;
+        using (stages?.Measure("layout"))
+        {
+            detected = settings.UseLayoutDetection && _layout is not null
+                ? _layout.Detect(page, settings.Layout, settings.LayoutProfile)
+                : [WholePage(page, settings.WholePageLabel)];
+        }
 
         // The page's pictures are gathered before the overlap filter runs, which is what lets a
         // figure a table swallowed still be identified after the filter has dropped it.
@@ -131,6 +147,8 @@ public sealed class DocumentParser : IDisposable
 
         try
         {
+            using (stages?.Measure("crop"))
+            {
             for (int i = 0; i < regions.Count; i++)
             {
                 LayoutBox region = regions[i].ClampTo(page.Width, page.Height);
@@ -151,6 +169,7 @@ public sealed class DocumentParser : IDisposable
                 }
 
                 sizes[i] = (crops[i].Width, crops[i].Height);
+            }
             }
 
             IReadOnlyCollection<string> nonMergeLabels = NonMergeLabels(settings);
@@ -175,29 +194,41 @@ public sealed class DocumentParser : IDisposable
                 int primary = group.Indices[0];
                 LayoutBox region = regions[primary].ClampTo(page.Width, page.Height);
 
-                using RgbImage merged = group.Indices.Count == 1
-                    ? crops[primary].Clone()
-                    : ImageStacker.Stack(
-                        [.. group.Indices.Select(index => crops[index])], group.Alignments);
+                RgbImage mergedImage;
+                using (stages?.Measure("stack"))
+                {
+                    mergedImage = group.Indices.Count == 1
+                        ? crops[primary].Clone()
+                        : ImageStacker.Stack(
+                            [.. group.Indices.Select(index => crops[index])], group.Alignments);
+                }
+
+                using RgbImage merged = mergedImage;
 
                 IReadOnlyList<TokenizedFigure> tokenized = [];
                 RgbImage prepared = merged;
 
                 if (region.Label == "table" && settings.TokenizeTableFigures)
                 {
-                    (prepared, tokenized, IReadOnlyList<string> swallowed) =
-                        TableFigureTokenizer.Tokenize(merged, region, figures);
-
-                    lock (absorbed)
+                    using (stages?.Measure("table-figures"))
                     {
-                        absorbed.UnionWith(swallowed);
+                        (prepared, tokenized, IReadOnlyList<string> swallowed) =
+                            TableFigureTokenizer.Tokenize(merged, region, figures);
+
+                        lock (absorbed)
+                        {
+                            absorbed.UnionWith(swallowed);
+                        }
                     }
                 }
 
                 try
                 {
-                    blocks[primary] = Recognize(prepared, region, settings, cancellationToken)
-                        with { GroupId = group.GroupId };
+                    using (stages?.Measure("recognize"))
+                    {
+                        blocks[primary] = Recognize(prepared, region, settings, cancellationToken)
+                            with { GroupId = group.GroupId };
+                    }
                 }
                 finally
                 {
@@ -249,6 +280,8 @@ public sealed class DocumentParser : IDisposable
                     RecognizeGroup(groupIndex);
                 }
             }
+
+            using PageProfile.Scope assembly = stages?.Measure("assemble") ?? default;
 
             for (int i = 0; i < blocks.Length; i++)
             {
@@ -341,7 +374,11 @@ public sealed class DocumentParser : IDisposable
 
         if (KeptAsPicture(region.Label, options))
         {
-            picture = ImageIO.EncodeJpeg(crop);
+            using (options.StageProfile?.Measure("encode-figure"))
+            {
+                picture = ImageIO.EncodeJpeg(crop);
+            }
+
             picturePath = FigurePath(region);
         }
 
@@ -358,7 +395,13 @@ public sealed class DocumentParser : IDisposable
             ? BlockPrompt.Spotting
             : BlockPrompt.For(region.Label, options.UseChartRecognition, options.UseSealRecognition);
 
-        using RgbImage prepared = Prepare(crop, region.Label, instruction);
+        RgbImage preparedCrop;
+        using (options.StageProfile?.Measure("prepare"))
+        {
+            preparedCrop = Prepare(crop, region.Label, instruction);
+        }
+
+        using RgbImage prepared = preparedCrop;
 
         // Spotting encodes coordinates as `<|LOC_n|>` tokens, which are special tokens: dropping
         // them during decoding would erase the geometry the mode exists to produce.
@@ -380,10 +423,13 @@ public sealed class DocumentParser : IDisposable
 
         if (region.Label == "table")
         {
-            string html = OtslTable.ToHtml(content);
-            if (html.Length > 0)
+            using (options.StageProfile?.Measure("otsl-to-html"))
             {
-                content = html;
+                string html = OtslTable.ToHtml(content);
+                if (html.Length > 0)
+                {
+                    content = html;
+                }
             }
         }
 
