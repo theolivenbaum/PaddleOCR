@@ -55,6 +55,12 @@ public static class TensorPool
     private static readonly ArrayPool<int> IntPool =
         ArrayPool<int>.Create(1 << 24, MaxArraysPerBucket);
 
+    // The Paddle graph interpreter holds every integral dtype — booleans included, which Paddle
+    // stores as bytes — as long, so a Bool[1, 300, 200, 200] mask in the layout detector's head is
+    // twelve million longs. Those are the largest buffers in the process after the weights.
+    private static readonly ArrayPool<long> LongPool =
+        ArrayPool<long>.Create(1 << 27, MaxArraysPerBucket);
+
     /// <summary>Rents a buffer of at least <paramref name="length"/> floats.</summary>
     /// <param name="length">Number of usable elements.</param>
     /// <param name="clear">When <see langword="true"/>, zeroes the usable portion before returning.</param>
@@ -83,6 +89,18 @@ public static class TensorPool
         if (array.Length != 0)
         {
             IntPool.Return(array);
+        }
+    }
+
+    /// <summary>Rents a raw long array of at least <paramref name="length"/> elements.</summary>
+    internal static long[] RentLongs(int length) => length == 0 ? [] : LongPool.Rent(length);
+
+    /// <summary>Returns a long array previously obtained from <see cref="RentLongs"/>.</summary>
+    internal static void ReturnLongs(long[] array)
+    {
+        if (array.Length != 0)
+        {
+            LongPool.Return(array);
         }
     }
 

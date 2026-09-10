@@ -138,9 +138,17 @@ public static class BenchCommand
         {
             var profile = new PirProfile();
             clock.Restart();
+
+            // Reported per iteration, because the interesting number is the second one: the graph
+            // runs the same shapes every time, so once its buffers are pooled a later detection
+            // should allocate almost nothing where the first still fills the pool.
+            long allocated = GC.GetAllocatedBytesForCurrentThread();
             IReadOnlyList<LayoutBox> boxes = detector.Detect(page, LayoutOptions.Default, profile);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+
             Console.WriteLine(
-                $"Layout  [{i}]: {clock.Elapsed.TotalMilliseconds:F0}ms, {boxes.Count} regions");
+                $"Layout  [{i}]: {clock.Elapsed.TotalMilliseconds:F0}ms, {boxes.Count} regions, "
+                + $"{allocated / (double)(1L << 20):F0} MiB allocated");
 
             if (i == iterations - 1)
             {

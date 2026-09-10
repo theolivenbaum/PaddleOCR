@@ -88,8 +88,33 @@ public sealed class PirInterpreter : IDisposable
         IPirTrace? trace = null,
         PirProfile? profile = null)
     {
-        object?[] values = new object?[_valueCount];
         var outputs = new Dictionary<string, PaddleTensor>(StringComparer.Ordinal);
+
+        // A trace keeps every intermediate alive past its last use, which is exactly what the
+        // arena's accounting assumes does not happen, so a traced run allocates as it always did.
+        using TensorArena? arena = trace is null ? TensorArena.Begin() : null;
+
+        try
+        {
+            Evaluate(inputs, outputs, arena, trace, profile);
+        }
+        finally
+        {
+            // The fetches are the caller's from here; everything else goes back to the pool.
+            arena?.ReleaseAllExcept(outputs.Values);
+        }
+
+        return outputs;
+    }
+
+    private void Evaluate(
+        IReadOnlyDictionary<string, PaddleTensor> inputs,
+        Dictionary<string, PaddleTensor> outputs,
+        TensorArena? arena,
+        IPirTrace? trace,
+        PirProfile? profile)
+    {
+        object?[] values = new object?[_valueCount];
 
         for (int index = 0; index < _program.Operations.Count; index++)
         {
@@ -114,18 +139,31 @@ public sealed class PirInterpreter : IDisposable
                     System.Diagnostics.Stopwatch.GetElapsedTime(started),
                     () => Describe(operation, values));
             }
+
             trace?.Record(index, operation, operation.Outputs.Select(id => id > 0 ? values[id] : null).ToArray());
+
+            // Retained before the inputs are dropped, so a result that aliases an input's storage
+            // is already counted when that input's own reference goes away.
+            if (arena is not null)
+            {
+                foreach (int id in operation.Outputs)
+                {
+                    if (id > 0)
+                    {
+                        arena.Retain(values[id]);
+                    }
+                }
+            }
 
             foreach (int id in operation.Inputs)
             {
                 if (id > 0 && _lastUse[id] == index && !_constants.ContainsKey(id))
                 {
+                    arena?.Release(values[id]);
                     values[id] = null;
                 }
             }
         }
-
-        return outputs;
     }
 
     private void Execute(
