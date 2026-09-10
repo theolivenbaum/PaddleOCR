@@ -155,6 +155,10 @@ SkiaSharp's resampler matches neither and is used only for decoding and encoding
   allocates its display class on entry, whichever branch runs, so a hot method with a parallel
   and a serial path must keep the lambda in a separate method. That one detail was 437 KiB per
   vision attention layer.
+- **Pool through `ArrayPool<T>.Shared`.** It pools buffers up to a gigabyte — the widely repeated
+  1 MiB bucket cap is .NET Framework folklore — and it keeps every buffer of a size where
+  `ArrayPool.Create` drops everything past `maxArraysPerBucket`. `TensorPool` is the one place that
+  policy is stated. Measure the shared pool before adding another.
 - **Weights stay in their on-disk dtype** (bf16) so a 0.9B model does not need a 4 GB float32
   shadow copy. The GEMM widens one column panel at a time and reuses it across every activation
   row; widening inside the inner loop instead costs more than the multiply-adds it feeds.
@@ -226,8 +230,8 @@ linear, so 36% at 1960 patches is 65% at 4900.
 
 The same table settles two smaller questions. The pipeline's own image work — cropping, masking,
 stacking, the markup conversions — is 0.2% of a page and is not worth attention. And one layout
-detection allocates 4.5 GiB, which is the graph's `long[]`-backed boolean tensors: a
-`Bool[1, 300, 200, 200]` mask is 96 MB where the same twelve million booleans would be 12.
+detection allocated 4.5 GiB, which turned out to be the largest single thing wrong with the port;
+see below.
 
 ### Against the original
 
@@ -264,8 +268,9 @@ its im2col columns rather than a dot product per output pixel.
 The layout graph is not GEMM-bound, and for a while it was not bound by anything defensible. The
 mask head works on `[1, 300, 200, 200]` tensors — twelve million elements — and its casts,
 comparisons and fills ran element at a time. Vectorising them took the stage from 9.3 s to 7.6 s
-with `conv2d` flat as a control, and moved the convolutions from a fifth of the graph to a third,
-which is where the remaining work is.
+with `conv2d` flat as a control, and moved the convolutions from a fifth of the graph to a third.
+What was actually left, though, was neither: the graph was allocation-bound, and pooling its
+intermediates took it from 7.5 s to 4.7 s — see "Where the allocations go".
 
 `PirProfile` (printed by `bench`) reports each operator's total, its slowest single call, and that
 call's result shape and Paddle module path. The shape column is what makes the layout graph's cost
@@ -401,6 +406,66 @@ what changed is which arbitrary reduction, because the truncator takes a differe
 shorter string. On the corpus's character-accuracy metric that costs 0.4 points of mean, all of it
 on that one page.
 
+### Where the allocations go
+
+A stage that allocates a lot is not automatically slow, so this is worth separating from the
+timings above. Two of the three big allocators turned out to be fine and the third was the
+layout graph's whole problem.
+
+| Stage | Per call, before | After |
+| --- | --- | --- |
+| layout detection | 4,458 MiB, every time | 1,038 MiB cold, then **145 MiB** |
+| vision tower | 411 MiB cold | 4 MiB per steady pass |
+| decoder prefill | 154 MiB cold | 3 MiB per steady pass |
+
+The tower and the decoder were already pooled; their cold figures are the pool filling, which is
+why the per-block column of `RecognitionProfile` shows one large block at 672 MiB and the next
+identical one at 67. Reading those as a leak is a mistake worth naming, because it sends you
+looking in the wrong half of the pipeline.
+
+**The layout graph was allocation-bound.** `TensorArena` gives a run's intermediate tensors pooled
+storage, and what makes that safe is knowing when a buffer is really dead — a tensor's array is
+not its own, since `reshape`, `cast` between same-width dtypes and `share_data_` all return a
+tensor over an existing array. The arena counts, per array, how many of the interpreter's value
+slots reference it, and returns the array at zero. The interpreter is the only place a run's
+tensors live and every operator's results land in slots it names, so the count is exact.
+Interleaved against the control at constant load, four detections in one process: **4,458 MiB and
+7.5 s per detection become 145 MiB and 4.7 s**.
+
+That result is also the answer to two experiments in the list below that came out neutral. Neither
+vectorising the graph's element-wise fallback nor taking the collector off a core did anything,
+because neither addressed the allocation.
+
+Pooling a buffer that a fresh allocation would have zeroed is a real hazard:
+`GC.AllocateUninitializedArray` of this size arrives zeroed in practice, so an operator that read
+its own output before writing it would have been quietly correct and would now produce garbage.
+`PADDLEOCR_SHARP_POISON_ARENA=1` fills every rented buffer with `NaN` and `long.MinValue` first;
+the corpus is byte-identical with it on, which is what says no operator does that.
+
+The remaining 145 MiB is not the tensors — it is a shape array, a results array and a few stride
+vectors per operator, several thousand times over. Worth taking only after something else.
+
+#### `ArrayPool<T>.Shared` is not the pool its reputation says
+
+`TensorPool` existed because "the default shared pool caps buckets at 1 MiB (2^20 bytes)". That
+was true of .NET Framework and has not been true for years. Measured, the shared pool round-trips
+a **1 GiB** float array with zero allocation, at every size from 1 MiB up.
+
+Believing it made things worse rather than neutral, because `ArrayPool.Create(_,
+maxArraysPerBucket)` keeps only that many buffers of a size and drops the rest, where the shared
+pool keeps them. Over a rent-and-return round of N live 4 MiB buffers:
+
+| N | shared | created(16) |
+| --- | --- | --- |
+| 16 | 0 MiB | 0 MiB |
+| 36 | 0 MiB | 16 MiB |
+| 64 | 0 MiB | 128 MiB |
+
+Thirty-six of one size is exactly what `KvCache` holds, two per layer, and one growth at the
+decoder's geometry is 576 MiB — so a cache on a created pool would churn 66 MiB per block where
+the shared pool churns nothing. `KvCacheTests` pins it. **Before adding a pool of your own here,
+measure the shared one.**
+
 ### Where the vision tower's time goes
 
 `bench` prints a stage profile for the tower (`StageProfile`, the hand-written towers' answer to
@@ -517,14 +582,28 @@ the argument for them is still convincing on paper, and someone will otherwise t
   against the control's 6.3-8.7 s, and a page measured 10.5-11.7 s against 11.7-12.3 s. Per-operator
   timings swung ±25-120% on operators the change never touched, which is what says the graph is not
   where its own profile appears to put it. Reverted, with the vectorised `Widen`, `Narrow` and
-  `Truncate` conversions that went with it.
+  `Truncate` conversions that went with it. **The reason is now known**: the graph was
+  allocation-bound, and pooling its intermediates was worth 37% where the arithmetic was worth
+  nothing.
 - **Turning off background GC**, on the argument that a collector thread is a fourth claimant on
   four cores while the layout graph churns 4.5 GiB of large tensors. First measured as 8.3-9.0 s
   against 5.6-6.1 s over five warm layout runs, which is a large clean-looking separation and was
   entirely an ordering artefact: the configurations ran in sequence, and the whole sequence drifts
   downward as the 125 MB of layout weights settle into the page cache. Interleaved — on, off, on,
   off — the warm medians are 5.12, 5.27, 5.19, 5.32 s. **Interleave the configurations, or the
-  first one measured pays for the page cache the others inherit.**
+  first one measured pays for the page cache the others inherit.** The premise was half right and
+  aimed at the wrong half: the churn was the problem, but the answer was to stop churning rather
+  than to collect it faster.
+- **Pooling `RgbImage`'s buffers through a pool sized past the shared one's supposed cap.** The
+  premise was the stale cap above, so the change was pointless; worse, routing `Clone` through it
+  rounds each image up to a power of two, and on a page's handful of differently-sized crops that
+  cold-pool slack costs more than it saves — `stack` measured 35 MiB against the control's 20.
+  Reverted. Images are a few tens of MiB a page against a gigabyte for the rest, so there was
+  little to win either way.
+- **Moving `KvCache` off `ArrayPool<T>.Shared`.** Same stale premise, and the measurement is the
+  other way round: 0 MiB a round on the shared pool against 66-130 MiB on a created one. Reverted,
+  and a test now pins it. The one thing worth keeping from the exercise is the shape of the mistake
+  — a diagnosis inherited from a comment, acted on without measuring the thing the comment claimed.
 - **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
   60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
   GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit

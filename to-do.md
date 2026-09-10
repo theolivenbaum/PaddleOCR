@@ -213,12 +213,18 @@ orientation classifier.*
       outermost
 - [x] Attention value product: chunked reduction with the output tile in registers
 - [x] Baseline and after, six pages of `pdf_scanned` + `images/ocr_*`, one page each
-- [ ] The layout graph is 8.3% of the corpus and allocates 4.5 GiB per detection, most of it
-      `Bool[1, 300, 200, 200]` masks held as `long[]` — 96 MB where 12 would do. Storing booleans
-      and 32-bit integers compactly is the change; it touches every operator kernel, so it wants
-      its own slice. Note that vectorising the broadcast fallback and tuning the GC were both
-      tried and were both neutral (see CLAUDE.md), so the allocation itself is the remaining
-      hypothesis, not the arithmetic.
+- [x] The layout graph allocated 4.5 GiB per detection. `TensorArena` pools the interpreter's
+      intermediates against an exact per-array count of the value slots referencing them:
+      **4,458 MiB and 7.5 s a detection become 145 MiB and 4.7 s**. The allocation was the
+      binding constraint, which is why vectorising the broadcast fallback and tuning the GC had
+      both been neutral.
+- [x] `TensorPool` on `ArrayPool<T>.Shared`. Its own pool was created on a stale premise (the
+      1 MiB bucket cap) and dropped every buffer past 16 of a size.
+- [ ] The arena's residual 145 MiB a detection is per-operator scaffolding — a shape array, a
+      results array and a few stride vectors, several thousand times over. `Bool` and `Int32`
+      tensors are still `long[]`, so a `[1, 300, 200, 200]` mask is 96 MB where 12 would do;
+      that is now a memory-footprint argument rather than a throughput one, since the buffers no
+      longer churn.
 - [ ] Only ~10 of the layout graph's 300 query masks survive the score threshold, and the graph
       reduces all 300. Pruning would be a semantic change to a fetched tensor, so it needs care.
 - [ ] Decode is 16% of the corpus at ~721 MB of bf16 weights per token, and the profile says it is
