@@ -106,6 +106,31 @@ public sealed record DocumentParserOptions
     /// </remarks>
     public Models.Paddle.PirProfile? LayoutProfile { get; init; }
 
+    /// <summary>
+    /// How the kernels spread work across threads, or <see langword="null"/> for
+    /// <see cref="Core.Parallelism.Default"/> — one worker per core.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One worker per core is the right default and not always the right answer: a host sharing
+    /// the machine with its own work, or running under a CPU quota that
+    /// <see cref="Environment.ProcessorCount"/> cannot see, wants fewer. The
+    /// <see cref="ParallelOptions.CancellationToken"/> on it is honoured by every kernel region
+    /// too, alongside the token passed to <see cref="DocumentParser.Parse"/>.
+    /// </para>
+    /// <para>
+    /// The instance is read, never copied, so do not mutate it while a parse is running. This
+    /// applies for the duration of <see cref="DocumentParser.Parse"/>; for the model and detector
+    /// entry points used directly, wrap the call in <see cref="Core.Parallelism.Use"/>.
+    /// </para>
+    /// <para>
+    /// Note that this is not <see cref="BlockConcurrency"/>. That decides how many blocks are
+    /// recognised at once; this decides how many threads the kernels inside one of them use, and
+    /// the two multiply.
+    /// </para>
+    /// </remarks>
+    public ParallelOptions? Parallelism { get; init; }
+
     /// <summary>Number of blocks recognised concurrently.</summary>
     /// <remarks>
     /// The model's own kernels already use every core, so blocks are recognised one at a time by

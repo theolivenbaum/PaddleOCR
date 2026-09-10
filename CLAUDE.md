@@ -516,6 +516,40 @@ been wrong — first the element-wise mask kernels, then the allocation, now the
 pattern is that each fix moved the bottleneck somewhere the previous profile could not see it, so
 **re-profile after every change to this graph rather than working down a stale list.**
 
+#### Choosing the degree of parallelism
+
+One worker per core is the default and not always the right answer: a host that shares the machine
+with its own work, or runs under a CPU quota `Environment.ProcessorCount` cannot see, wants fewer.
+`DocumentParserOptions.Parallelism` takes a `ParallelOptions` for a parse, `Parallelism.Use` scopes
+one around any other entry point, and `Parallelism.Default` sets it for the process;
+`parse --max-parallelism <n>` is the same setting from the command line. The
+`ParallelOptions.CancellationToken` is honoured by every kernel region, so it is also how a caller
+cancels work already inside a GEMM.
+
+It is ambient rather than a parameter because the kernels that spread work are static and sit a
+dozen layers of shape algebra below the pipeline; threading an argument to each would put a
+parameter on `Gemm.Linear` for the benefit of its callers' callers. It is an `AsyncLocal` rather
+than a thread-static because `BlockConcurrency` above one puts a block's tower and decoder on pool
+threads, where a thread-static set on the calling thread would not be — `ParallelismScopeTests`
+pins both halves. The lookup happens once per parallel region, a few thousand times over a page
+against regions that each cost microseconds: interleaved against the `static readonly` field it
+replaced, four warm layout detections measured a 3,930 ms median against 3,850, inside a noise
+band whose samples span 3,758-4,279 within one configuration.
+
+Note that it is not `BlockConcurrency`. That decides how many blocks are recognised at once, this
+how many threads the kernels inside one of them use, and the two multiply. Measured on
+`ocr_test_original.png`, interleaved, with both endpoints repeated:
+
+| degree | page | layout | vision |
+| --- | --- | --- | --- |
+| 4 (one per core) | 13.9 / 13.7 s | 8.3 / 7.9 s | 3.9 / 4.1 s |
+| 2 | 18.1 s | 9.1 s | 6.5 s |
+| 1 | 27.5 / 29.0 s | 12.9 / 13.6 s | 10.5 / 11.4 s |
+
+Vision spans 2.75x across that, close to the 3x the tower's own scaling measurement gives, while
+layout spans 1.6x because much of that graph is serial. The output is byte-identical at every
+degree, which it has to be — nothing here changes the arithmetic or its order.
+
 #### `ArrayPool<T>.Shared` is not the pool its reputation says
 
 `TensorPool` existed because "the default shared pool caps buckets at 1 MiB (2^20 bytes)". That
@@ -575,7 +609,7 @@ controls:
   blocks, and attention holds megabytes per worker at this page size, so the extra threads divided
   the cache and added switches. The instrumentation said so directly: the thread-time sum was 6.8x
   the stage's wall time on a four-core machine, and capping it took that to 3.89x. `Parallelism`
-  now holds one shared `ParallelOptions` for every kernel that spreads work.
+  is the one place that policy lives, and every kernel that spreads work reads it.
 - **The score product reduces over 72 columns**, so the general kernel finishes every output with
   a lane reduction, and its four accumulators cannot fill two FMA ports at four cycles of latency.
   Transposing each head's keys to `[headDim][tokens]` makes the lanes output columns: the tile

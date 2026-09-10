@@ -81,6 +81,11 @@ public sealed class DocumentParser : IDisposable
         CancellationToken cancellationToken = default)
     {
         DocumentParserOptions settings = options ?? DocumentParserOptions.Default;
+
+        // Ambient for the whole parse, so it reaches the kernels without a parameter on every
+        // layer between here and them — and it is an AsyncLocal, so it survives the block loop
+        // below putting a block's tower and decoder on pool threads.
+        using Core.Parallelism.Scope parallelism = Core.Parallelism.Use(settings.Parallelism);
         using PageProfile.Scope whole = settings.StageProfile?.Measure("page") ?? default;
 
         RgbImage? prepared = null;
