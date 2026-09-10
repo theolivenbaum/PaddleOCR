@@ -90,6 +90,22 @@ public sealed record DocumentParserOptions
     /// </remarks>
     public RecognitionProfile? Profile { get; init; }
 
+    /// <summary>Optional collector for what each pipeline stage outside the model call cost.</summary>
+    /// <remarks>
+    /// Off by default. Complements <see cref="Profile"/>: that one accounts for the tower and the
+    /// token loop, this one for layout detection, cropping, masking, crop preparation and the
+    /// markup conversions, which together are a fifth of a scanned page's run.
+    /// </remarks>
+    public PageProfile? StageProfile { get; init; }
+
+    /// <summary>Optional collector for the layout graph's per-operator cost.</summary>
+    /// <remarks>
+    /// Off by default. Layout detection is a single stage from the pipeline's point of view, and
+    /// on a scanned page it is a large one; this is what says which of the graph's operators it
+    /// went to.
+    /// </remarks>
+    public Models.Paddle.PirProfile? LayoutProfile { get; init; }
+
     /// <summary>Number of blocks recognised concurrently.</summary>
     /// <remarks>
     /// The model's own kernels already use every core, so blocks are recognised one at a time by

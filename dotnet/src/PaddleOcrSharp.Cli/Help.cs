@@ -43,7 +43,9 @@ public static class Help
                                       Stop a block once its output has fallen into a verbatim
                                       cycle (default: true). The tokens this skips are the ones
                                       the repetition truncator discards anyway.
-              --profile               Print per-block tokens, timings and allocations
+              --profile               Print per-block tokens, timings and allocations, and the
+                                      per-stage cost of everything outside the model call
+              --layout-profile        Also print the layout graph's per-operator cost
 
             recognize options:
               --prompt-label <name>   ocr | table | formula | chart | seal | spotting  (default: ocr)

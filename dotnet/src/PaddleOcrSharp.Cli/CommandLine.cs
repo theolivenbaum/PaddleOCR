@@ -39,7 +39,14 @@ public sealed class CommandLine
                     continue;
                 }
 
-                bool hasValue = i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal);
+                // A switch takes the following token only when that token is a boolean literal:
+                // `--stop-on-repetition false` and `--calibrate false` have to keep working, but
+                // `--profile page.pdf` must not eat the path — which is what a greedy rule did,
+                // leaving the run to fail with "parse needs at least one image path".
+                bool hasValue = i + 1 < args.Length
+                    && !args[i + 1].StartsWith("--", StringComparison.Ordinal)
+                    && !(IsSwitch(name) && !IsBooleanLiteral(args[i + 1]));
+
                 result._options[name] = hasValue ? args[++i] : "true";
                 continue;
             }
@@ -56,6 +63,38 @@ public sealed class CommandLine
 
         return result;
     }
+
+    /// <summary>
+    /// Options that mean something on their own. Everything else needs a value, so the token
+    /// after it is taken whatever it looks like.
+    /// </summary>
+    private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "profile",
+        "layout-profile",
+        "no-layout",
+        "no-vl",
+        "chart",
+        "seal",
+        "ocr-images",
+        "doc-orientation",
+        "doc-unwarping",
+        "format-block-content",
+        "merge-tables",
+        "title-levels",
+        "stop-on-repetition",
+        "calibrate",
+        "gemm",
+        "help",
+    };
+
+    private static bool IsSwitch(string name) =>
+        Switches.Contains(name)
+        || (name.StartsWith("no-", StringComparison.OrdinalIgnoreCase) && Switches.Contains(name[3..]));
+
+    private static bool IsBooleanLiteral(string value) =>
+        value.Equals("true", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("false", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether <paramref name="name"/> was given.</summary>
     public bool Has(string name) => _options.ContainsKey(name);
