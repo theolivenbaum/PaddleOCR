@@ -32,6 +32,11 @@ public static class Help
               --doc-unwarping         Flatten curled pages before parsing
               --prompt-label <name>   Whole-page mode label when --no-layout (e.g. spotting)
               --dpi <n>               PDF rendering resolution (default: 144, as upstream)
+              --cap-dpi-to-source <bool>
+                                      Render a scanned page at its own resolution when that is
+                                      lower than --dpi (default: true). A 96 dpi scan rendered at
+                                      144 is interpolated, not sharper, and costs 2.25x the
+                                      patches for the same text.
               --max-pages <n>         Stop after this many PDF pages
               --password <text>       Password for an encrypted PDF
               --output-dir <path>     Write <name>.md, <name>.json and imgs/ per page

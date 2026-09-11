@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/PaddleOcrSharp/PaddleOcrSharp.csproj" />
+    <ProjectReference Include="../../src/PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj" />
   </ItemGroup>
 
 </Project>
