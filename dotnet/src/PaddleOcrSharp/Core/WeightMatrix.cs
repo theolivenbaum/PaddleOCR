@@ -36,6 +36,24 @@ public readonly struct WeightMatrix
     /// <summary><see langword="true"/> when no storage is attached.</summary>
     public bool IsEmpty => _bytes.IsEmpty;
 
+    /// <summary>
+    /// The storage as float32, when it already is — so a caller that would otherwise widen a
+    /// panel into scratch can read the rows where they lie.
+    /// </summary>
+    /// <returns><see langword="true"/> and the values when the dtype is float32.</returns>
+    /// <param name="values">Receives the matrix, row-major, on success.</param>
+    public bool TryGetFloats(out ReadOnlySpan<float> values)
+    {
+        if (Dtype != DType.Float32)
+        {
+            values = default;
+            return false;
+        }
+
+        values = MemoryMarshal.Cast<byte, float>(_bytes.Span);
+        return true;
+    }
+
     /// <summary>Wraps raw bytes as a weight matrix.</summary>
     public static WeightMatrix Create(ReadOnlyMemory<byte> bytes, DType dtype, int rows, int cols)
     {

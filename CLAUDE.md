@@ -258,6 +258,140 @@ which is what an earlier and much less flattering comparison had accidentally fo
 column. And the machine moves: the same Python run measured 123.5 s a few days earlier against
 131.9 s here, which is why both sides are always measured in one sitting.
 
+#### Measured again, stage by stage, against a genuine PaddleX v1.6 install
+
+That table is end-to-end only, and end-to-end hides that the two halves of the pipeline go in
+opposite directions. Re-measured on a different machine (4 cores, Xeon @ 2.10 GHz) against
+`paddleocr.PaddleOCRVL(pipeline_version="v1.6", vl_rec_backend="native")` — the real wrapper over
+the real PaddleX pipeline, pointed at the same two model directories the port loads, everything
+else at upstream's defaults. One page per process pair, upstream then port back to back, so
+machine drift stays inside a pair; model loading excluded on both sides.
+
+| Page | upstream | port | |
+| --- | --- | --- | --- |
+| `ocr_test_original.png` (1 block, 672 patches) | 16.0 s | 13.8 s | 1.16x |
+| `nougat_004_scanned.pdf` (6 blocks, 4.7k patches) | 83.8 s | 39.6 s | 2.12x |
+| `code_and_formula` p1 (8 blocks, 18.5k patches) | 1016.6 s | 223.3 s | 4.55x |
+| `ocr_image.jpg` (5 blocks, one table) | did not finish in 90 min | 74.4 s | — |
+
+The markdown is identical on all three that finished, to the trailing newline the port adds and
+upstream does not, so this is again the same work in less time. `ocr_image.jpg` was given a
+90-minute budget twice and produced no page either time; it is reported as it was measured, not
+diagnosed.
+
+The ratio's spread across that table is not noise, and splitting the page says where it comes
+from. Upstream's own two stages were timed by wrapping `layout_det_model.apply` and
+`vl_rec_model.predict` in place (`__call__` on a PaddleX predictor delegates to `apply`, and a
+dunder is looked up on the type, so `apply` is the hook that sees the work); the port's come from
+`parse --profile`. As first measured:
+
+| Page | layout: upstream | layout: port | VL: upstream | VL: port |
+| --- | --- | --- | --- | --- |
+| `ocr_test_original.png` | 2.0 s | 6.3 s | 11.5 s | 7.5 s |
+| `nougat_004_scanned.pdf` | 1.7 s | 5.9 s | 73.3 s | 33.6 s |
+
+**The port won the VL half by 1.5-2.2x and lost the layout half by about 3x.** Everything in the
+end-to-end table follows from those two numbers: the layout deficit was a near-constant ~4 s, so it
+was 30% of a trivial page and 2% of a heavy one, and the VL win is proportional to the work — which
+is why a one-block page came out at 1.16x and an eight-block page at 4.55x.
+
+Two structural differences behind the VL half, both worth stating because both invite the wrong
+conclusion:
+
+- **Upstream runs the VL model in fp32 on CPU.** `is_bfloat16_available` excludes CPU, so
+  PaddleX's `doc_vlm` predictor casts the bf16 checkpoint up at load. Decoding is bandwidth-bound
+  on weight streaming, so upstream re-reads 4 bytes per parameter per token where the port reads
+  2. That kills the idea of moving the port to fp32 activations for parity — it would be a
+  divergence from upstream's *numbers* in the name of matching its *dtype*, and it would cost
+  roughly the whole decode win.
+- **Loading.** Upstream builds its pipeline in 22-57 s at ~9 GB RSS (the fp32 shadow copy above);
+  the port memory-maps the bf16 weights in 0.5-1.0 s. Excluded from every figure here, but it is
+  the difference between a pipeline you can start per page and one you cannot.
+
+And one that was simply a mistake on this side: **upstream renders PDF pages at 144 dpi**
+(`PDFReader(zoom=2.0)` over the natural 72), where the port defaulted to 200. At 200 a page
+carries 1.93x the pixels and so 1.93x the patches, so the port had been doing appreciably more
+work than upstream on every PDF in the comparison and being timed against it anyway. The default
+is now 144; `nougat_004_scanned.pdf` went from 50.6 s to 39.6 s on the change alone, and its
+output matches upstream's at the matched resolution.
+
+#### Closing the layout gap
+
+That deficit is gone. Measured with both sides inside one shell invocation, so neither can be
+attributed to a different machine than the other — upstream's three pages in one process, the
+port's one process per page, as a user runs it:
+
+| Page | upstream | port | |
+| --- | --- | --- | --- |
+| `ocr_test_original.png` | 16.6 s | 8.8 s | **1.89x** |
+| `nougat_004_scanned.pdf` | 74.0 s | 37.3 s | **1.98x** |
+| `code_and_formula_scanned.pdf` p1 | 1250.7 s | 165.6 s | **7.55x** |
+
+| Page | layout: upstream | layout: port | VL: upstream | VL: port |
+| --- | --- | --- | --- | --- |
+| `ocr_test_original.png` | 3.0 s | 3.4 s | 13.5 s | 5.3 s |
+| `nougat_004_scanned.pdf` | 2.2 s | 3.5 s | 71.7 s | 33.7 s |
+| `code_and_formula_scanned.pdf` p1 | 4.0 s | 3.5 s | 1246.4 s | 162.1 s |
+
+The port's layout column is a cold process every time; upstream's is warm after its first page, so
+2.2 s is its steady state and 3.0 s its own cold one. Against the cold figure the port is at
+parity; against the steady one it is within about 1.6x, from 3x. A warm detection in `bench` is
+2.66-2.72 s against the 3.8 s it was.
+
+Six changes did it, each A/B'd interleaved in one sitting, and the output is byte-identical to the
+pre-optimisation build on all four test pages:
+
+- **The convolutions reached the wrong GEMM.** `conv2d` is 157 GFLOP of a detection and ran at
+  81 GFLOP/s, against the 250 the same machine sustains through `Gemm.Linear` on the vision
+  tower's shapes. `Gemm.MatMul`'s `k × n` form accumulates whole output rows in memory — one load
+  and one store per multiply-add — where `Linear` widens a column panel once and reduces four rows
+  against four columns in registers. The convolution is now posed as the shape `Linear` wants: the
+  filters as the activation rows and the im2col columns as the weight panel, which also lands the
+  product in `[channel, pixel]` order, so it copies out rather than transposing. im2col runs over
+  a block of output rows sized by a column budget — at 4 MB the GEMM measured 3767 ms over three
+  detections against 2884 at 16 MB, and 32 MB was no better. **-10% of the stage.**
+- **Almost nothing outside `conv2d` was threaded.** The element-wise kernels, the casts, the
+  broadcast walks, the transposes and `where` all ran on one core while the convolutions used
+  four. `Parallelism.Chunked` is now the one place that split is expressed, and the walks that
+  needed to start somewhere other than zero get their counters from `Broadcast.Seed`.
+  **-31% of the stage**, and the largest single item in this list.
+- **`batch_norm_` was a scalar loop** with two freshly allocated per-channel arrays, and **`any`
+  over a contiguous suffix** went through the generic reduction's per-element index arithmetic and
+  `double` conversion. 156 -> 34 ms and 68 ms -> off the profile.
+- **The depthwise convolution ran at 3.7 GFLOP/s**, bounds-checking each of a 5×5 window's
+  twenty-five taps per output pixel. Its stride-1 interior now accumulates a vector of output
+  columns in a register across the window: 149 -> 41 ms.
+- **`Gemm.MatMul`'s direct tile is register-blocked** — four output rows by two vectors of columns
+  held in registers for the whole reduction — which is the same store-port bound the vision
+  tower's value product had. The deformable attention is where that lands: matmul 221 -> 178 ms.
+  `Gemm.Linear` also stopped widening a float32 panel into scratch, which for float32 is a copy
+  and nothing else, and the convolution hands it 2.1 GB of im2col columns a detection.
+- **`einsum` rebuilt every operand's offset from the counters for each of 23 million terms.**
+  The summed axes are the tail of the label order, so each output element owns one contiguous run
+  of the walk: offsets are carried forward and the walk splits by output element. 88 -> 45 ms.
+
+And one that is not a kernel at all. **Every run of the tool is a cold process** — it parses a
+document and exits, so the first pass through the layout graph and the vision tower runs as tier-0
+code and nothing ever reaches the steady state tiered compilation is designed for. Compiling
+optimised up front, on a page: layout 5061/4721 -> 3194/3262 ms, the whole page 10712/10036 ->
+8149/8352, recognition 5623/5287 -> 4909/5044. It is set on the tool alone, so a long-lived host
+embedding the library keeps tiering, and `DOTNET_TieredCompilation=1` overrides it.
+
+Post-everything the graph is still `conv2d`-bound, and more so than before:
+
+| Operator | Share of a 2.69 s detection |
+| --- | --- |
+| `conv2d` | **60.0%** |
+| `matmul`, `add`, `transpose` (deformable attention) | 14.6% |
+| `depthwise_conv2d`, `batch_norm_`, `concat`, `grid_sample` | 6.7% |
+| the mask head's `cast`, `multiply`, `where`, `slice`, `full_like` | 7.8% |
+
+What remains in `conv2d` splits roughly 65% GEMM, 30% im2col fill, 5% copy-out, with the GEMM at
+about 180 GFLOP/s. Closing the rest of it means a GEMM that blocks the reduction as well as the
+output — `Linear` sweeps its panel once per four activation rows, which is 0.5 bytes per flop from
+L2 whatever the panel width — and that is a change to the kernel every other stage depends on.
+
+
 Both model halves are GEMM-bound, and the shape of the win is the same in each: give the inner
 loop enough reuse that it is compute-bound rather than load-bound. `Gemm.Linear` widens a bf16
 column panel once and reuses it across every activation row; `Gemm.MatMul` tiles the output and
@@ -497,14 +631,9 @@ arena: by storage — float 5431 MiB, integral 928 MiB
 
 Integral storage is 15% of the traffic. Narrowing it to a byte would take 928 MiB to about 116,
 which is 13% of the total — and the operators that touch those tensors are no longer where the
-time is either. Post-arena the graph is **`conv2d`-bound**:
-
-| Operator | Share of a 4.05 s detection |
-| --- | --- |
-| `conv2d` | **47.9%** |
-| `matmul`, `transpose`, `add` (deformable attention) | 17.5% |
-| the mask head's `cast`, `where`, `multiply`, `greater_than`, `any` | 11.7% |
-| `batch_norm_`, `depthwise_conv2d`, `concat`, `relu` | 11.2% |
+time is either. Post-arena the graph was **`conv2d`-bound** at 47.9% of a 4.05 s detection, and
+after the work in "Closing the layout gap" it is 60.0% of a 2.69 s one — the mask-head operators
+that this question is about are 7.8%.
 
 So the whole boolean-width question is worth at most half of 11.7% of a stage that is 8% of a
 page, against a change to the interpreter's storage model and the byte-exactness every parity
@@ -709,6 +838,29 @@ the argument for them is still convincing on paper, and someone will otherwise t
   other way round: 0 MiB a round on the shared pool against 66-130 MiB on a created one. Reverted,
   and a test now pins it. The one thing worth keeping from the exercise is the shape of the mistake
   — a diagnosis inherited from a comment, acted on without measuring the thing the comment claimed.
+- **Zeroing the convolution's im2col buffer once per worker instead of once per output row.**
+  The buffer is cleared and then scattered into, and whether a position is written depends on the
+  horizontal tap alone for every row a worker handles — so the positions the scatter skips are
+  never written by any row and the initial zero would stand. That removes 2.1 GB of stores a
+  detection and is worth **nothing**: 3.55/3.96, 3.81/3.72, 3.76/3.89 s against a control of
+  3.55/3.82, 3.81/3.68, 3.76/3.71. The buffer fits L2, so the stores were never leaving it.
+- **Filling that buffer pixel-outermost, so every store is contiguous.** Worse, not better: the
+  fill went 1330 -> 1760 ms over three detections, because it trades strided stores for strided
+  reads of every input channel. The tap-outermost order stayed.
+- **Skipping im2col for 1x1 convolutions.** Their columns are a transpose of the input and nothing
+  else — 382 MB of gathering a detection, for 38% of the convolution's arithmetic — and the
+  operands in place are exactly the `k × n` form `Gemm.MatMul` takes. Slower: conv2d 1478 -> 1686
+  ms, even with the register-blocked tile. The transpose buys the reduction a contiguous axis, and
+  `Linear`'s four-by-four tile does sixteen multiply-adds per eight loads where the broadcast
+  kernel does eight per six.
+- **Widening `Gemm.Linear`'s column panel past 256 KB.** The panel is swept once per four
+  activation rows, so a wider one should cut the traffic proportionally. Over layout detections at
+  256/512/1024 KB: 3187/3361, 3223/3517, 3455/3147 ms — no separation at all.
+- **ReadyToRun.** The usual answer to a cold process, and it measured worse on both the first
+  detection (5373/5398 ms against 4581/5014) and the warm ones (2922/2757 against 2557/2562):
+  its precompiled code targets a conservative instruction set, and this is SIMD-bound work that
+  tiers up regardless. Turning tiered compilation off entirely is what worked — see "Closing the
+  layout gap".
 - **Using AVX-512 where the runtime's preferred width says 256.** A dependency-free FMA loop is
   60% faster at 512 bits, and the ISA is reachable regardless of the policy — but every 512-bit
   GEMM variant measured slower than the 256-bit kernel, including a narrowed tile chosen to fit

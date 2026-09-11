@@ -79,6 +79,43 @@ public static class Parallelism
     /// </remarks>
     public static Scope Use(ParallelOptions? options) => new(options);
 
+    /// <summary>Elements below which splitting a pass across threads costs more than it saves.</summary>
+    private const int MinimumChunk = 1 << 15;
+
+    /// <summary>
+    /// Runs <paramref name="body"/> over contiguous chunks of <c>[0, length)</c>, in parallel when
+    /// there is enough of it to be worth the split, and once inline when there is not.
+    /// </summary>
+    /// <remarks>
+    /// The layout graph's element-wise and shape operators are passes over tensors of up to twelve
+    /// million elements, and they ran on one thread while the convolutions used four. This is the
+    /// one place that split is expressed, so a caller states its range rather than its threading.
+    /// </remarks>
+    /// <param name="length">Number of elements to cover.</param>
+    /// <param name="body">Receives a half-open <c>[start, end)</c> range.</param>
+    public static void Chunked(int length, Action<int, int> body)
+    {
+        int workers = Options.MaxDegreeOfParallelism;
+        if (workers <= 0)
+        {
+            workers = Environment.ProcessorCount;
+        }
+
+        int chunks = Math.Min(workers, length / MinimumChunk);
+        if (chunks <= 1)
+        {
+            body(0, length);
+            return;
+        }
+
+        int size = ((length - 1) / chunks) + 1;
+        Parallel.For(0, chunks, Options, chunk =>
+        {
+            int start = chunk * size;
+            body(start, Math.Min(length, start + size));
+        });
+    }
+
     /// <summary>A period during which the kernels use one caller's options.</summary>
     public readonly struct Scope : IDisposable
     {

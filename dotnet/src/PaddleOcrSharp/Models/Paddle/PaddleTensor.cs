@@ -215,14 +215,14 @@ public sealed class PaddleTensor
             if (dtype == PaddleDType.Bool)
             {
                 PaddleTensor booleans = Int(Shape, dtype);
-                Normalize(IntSpan, booleans.IntSpan);
+                Convert(Ints!, booleans.Ints!, Count, normalize: true);
                 return booleans;
             }
 
             if (dtype == PaddleDType.Int32)
             {
                 PaddleTensor narrowed = Int(Shape, dtype);
-                Truncate(IntSpan, narrowed.IntSpan);
+                Convert(Ints!, narrowed.Ints!, Count, normalize: false);
                 return narrowed;
             }
 
@@ -232,25 +232,50 @@ public sealed class PaddleTensor
         if (dtype.IsFloat())
         {
             PaddleTensor floats = Float(Shape, dtype);
-            Widen(IntSpan, floats.FloatSpan);
+            Convert(Ints!, floats.Floats!, Count);
             return floats;
         }
 
         PaddleTensor integers = Int(Shape, dtype);
-        ReadOnlySpan<float> values = FloatSpan;
-        Span<long> results = integers.IntSpan;
-
-        if (dtype == PaddleDType.Bool)
-        {
-            Normalize(values, results);
-        }
-        else
-        {
-            Narrow(values, results);
-        }
-
+        Convert(Floats!, integers.Ints!, Count, normalize: dtype == PaddleDType.Bool);
         return integers;
     }
+
+    /// <summary>
+    /// The conversions above, split across threads. A cast in the mask head walks twelve million
+    /// elements, and on one thread it was 140 ms of a detection with three cores idle.
+    /// </summary>
+    private static void Convert(long[] source, long[] destination, int count, bool normalize) =>
+        Parallelism.Chunked(count, (start, end) =>
+        {
+            if (normalize)
+            {
+                NormalizeRange(source.AsSpan(start, end - start), destination.AsSpan(start, end - start));
+            }
+            else
+            {
+                TruncateRange(source.AsSpan(start, end - start), destination.AsSpan(start, end - start));
+            }
+        });
+
+    /// <inheritdoc cref="Convert(long[], long[], int, bool)"/>
+    private static void Convert(long[] source, float[] destination, int count) =>
+        Parallelism.Chunked(count, (start, end) =>
+            WidenRange(source.AsSpan(start, end - start), destination.AsSpan(start, end - start)));
+
+    /// <inheritdoc cref="Convert(long[], long[], int, bool)"/>
+    private static void Convert(float[] source, long[] destination, int count, bool normalize) =>
+        Parallelism.Chunked(count, (start, end) =>
+        {
+            if (normalize)
+            {
+                NormalizeRange(source.AsSpan(start, end - start), destination.AsSpan(start, end - start));
+            }
+            else
+            {
+                NarrowRange(source.AsSpan(start, end - start), destination.AsSpan(start, end - start));
+            }
+        });
 
     /// <summary>Deep copy.</summary>
     public PaddleTensor Clone()
@@ -275,7 +300,7 @@ public sealed class PaddleTensor
     /// these replace was one of the layout graph's larger line items. Comparing against zero and
     /// keeping the all-ones result as a mask gives the same answer with no branch per element.
     /// </remarks>
-    private static void Normalize(ReadOnlySpan<long> source, Span<long> destination)
+    private static void NormalizeRange(ReadOnlySpan<long> source, Span<long> destination)
     {
         int i = 0;
 
@@ -302,13 +327,13 @@ public sealed class PaddleTensor
         }
     }
 
-    /// <inheritdoc cref="Normalize(ReadOnlySpan{long}, Span{long})" />
+    /// <inheritdoc cref="NormalizeRange(ReadOnlySpan{long}, Span{long})" />
     /// <remarks>
     /// This is the direction the mask head takes — a float logit tensor to a boolean — and the
     /// one the layout graph spends most of its casting time in. Each input vector produces two
     /// output vectors, because a boolean is stored in the same 64-bit lane an integer would use.
     /// </remarks>
-    private static void Normalize(ReadOnlySpan<float> source, Span<long> destination)
+    private static void NormalizeRange(ReadOnlySpan<float> source, Span<long> destination)
     {
         int i = 0;
 
@@ -346,7 +371,7 @@ public sealed class PaddleTensor
     }
 
     /// <summary>Truncates each value to 32 bits, keeping the 64-bit storage.</summary>
-    private static void Truncate(ReadOnlySpan<long> source, Span<long> destination)
+    private static void TruncateRange(ReadOnlySpan<long> source, Span<long> destination)
     {
         for (int i = 0; i < source.Length; i++)
         {
@@ -355,7 +380,7 @@ public sealed class PaddleTensor
     }
 
     /// <summary>Converts integers to float32.</summary>
-    private static void Widen(ReadOnlySpan<long> source, Span<float> destination)
+    private static void WidenRange(ReadOnlySpan<long> source, Span<float> destination)
     {
         for (int i = 0; i < source.Length; i++)
         {
@@ -364,7 +389,7 @@ public sealed class PaddleTensor
     }
 
     /// <summary>Truncates floats towards zero into 64-bit integers.</summary>
-    private static void Narrow(ReadOnlySpan<float> source, Span<long> destination)
+    private static void NarrowRange(ReadOnlySpan<float> source, Span<long> destination)
     {
         for (int i = 0; i < source.Length; i++)
         {

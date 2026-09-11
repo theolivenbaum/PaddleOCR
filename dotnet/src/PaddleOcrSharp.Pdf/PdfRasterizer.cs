@@ -13,8 +13,17 @@ namespace PaddleOcrSharp.Pdf;
 /// </remarks>
 public static class PdfRasterizer
 {
-    /// <summary>Resolution used when none is given; enough for 8-10 pt body text.</summary>
-    public const int DefaultDpi = 200;
+    /// <summary>Resolution used when none is given, matching upstream's.</summary>
+    /// <remarks>
+    /// PaddleX renders a page with <c>zoom=2.0</c> over the PDF's natural 72 dpi
+    /// (<c>inference/utils/io/readers.py</c>), so 144 is what the pipeline this port reproduces
+    /// actually sees. The port defaulted to 200 for long enough to distort a comparison: at 200
+    /// a page carries 1.93x the pixels, which is 1.93x the patches for the vision tower to
+    /// encode, so the port was doing appreciably more work than upstream on the same file and
+    /// still being timed against it. Raise it with <c>--dpi</c> where a scan of small type needs
+    /// it; the model's own pixel budget caps a block either way.
+    /// </remarks>
+    public const int DefaultDpi = 144;
 
     /// <summary>Number of pages in the document.</summary>
     public static int GetPageCount(string path, string? password = null) =>

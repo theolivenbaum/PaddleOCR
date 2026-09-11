@@ -157,9 +157,20 @@ public static class Gemm
             return;
         }
 
-        using PooledBuffer panel = TensorPool.Rent(colCount * inner);
-        Span<float> w = panel.Span;
-        weight.CopyRows(colStart, colCount, w);
+        // Float32 weights need no widening, so the panel is read where it lies. The layout
+        // graph's convolutions call this once per block of output rows with the im2col columns
+        // as the weight, and copying them again was a second pass over 2.1 GB a detection.
+        bool inPlace = weight.TryGetFloats(out ReadOnlySpan<float> stored);
+        using PooledBuffer panel = inPlace ? default : TensorPool.Rent(colCount * inner);
+        Span<float> scratch = panel.Span;
+        if (!inPlace)
+        {
+            weight.CopyRows(colStart, colCount, scratch);
+        }
+
+        ReadOnlySpan<float> w = inPlace
+            ? stored.Slice(colStart * inner, colCount * inner)
+            : scratch;
 
         Span<float> tile = stackalloc float[16];
 
@@ -601,6 +612,13 @@ public static class Gemm
     }
 
     /// <summary>One output tile when the right-hand matrix is stored <c>k × n</c>.</summary>
+    /// <remarks>
+    /// Four output rows by two vectors of columns are accumulated in registers across the whole
+    /// reduction and stored once. Accumulating them in memory instead — which is what
+    /// <see cref="AccumulateQuad"/> does, and what this did for every column — is one load and
+    /// one store of every output element on every one of <c>k</c> steps, against a single store
+    /// port. It is the same bound the vision tower's value product turned out to have.
+    /// </remarks>
     private static void DirectTile(
         ReadOnlySpan<float> a,
         ReadOnlySpan<float> b,
@@ -612,51 +630,24 @@ public static class Gemm
         int column,
         int columns)
     {
+        int block = 2 * Vector256<float>.Count;
+
         int i = 0;
         for (; i <= rows - 4; i += 4)
         {
-            Span<float> d0 = y.Slice(((row + i) * n) + column, columns);
-            Span<float> d1 = y.Slice(((row + i + 1) * n) + column, columns);
-            Span<float> d2 = y.Slice(((row + i + 2) * n) + column, columns);
-            Span<float> d3 = y.Slice(((row + i + 3) * n) + column, columns);
+            int j = 0;
 
-            d0.Clear();
-            d1.Clear();
-            d2.Clear();
-            d3.Clear();
-
-            // References are taken once for the whole reduction. Re-slicing the right-hand row and
-            // calling out per term costs a span construction, a broadcast quad and a call for four
-            // multiply-adds of work, which is most of what this loop was spending: the reduction
-            // axis here is the token count, so it runs thousands of times for one small tile.
-            ref float aRef = ref MemoryMarshal.GetReference(a);
-            ref float bRef = ref MemoryMarshal.GetReference(b);
-            ref float dest0 = ref MemoryMarshal.GetReference(d0);
-            ref float dest1 = ref MemoryMarshal.GetReference(d1);
-            ref float dest2 = ref MemoryMarshal.GetReference(d2);
-            ref float dest3 = ref MemoryMarshal.GetReference(d3);
-
-            int base0 = (row + i) * k;
-
-            for (int p = 0; p < k; p++)
+            if (Simd.Use256)
             {
-                float s0 = Unsafe.Add(ref aRef, base0 + p);
-                float s1 = Unsafe.Add(ref aRef, base0 + k + p);
-                float s2 = Unsafe.Add(ref aRef, base0 + (2 * k) + p);
-                float s3 = Unsafe.Add(ref aRef, base0 + (3 * k) + p);
-
-                // Masks and attention weights are genuinely sparse; skipping a whole quad of
-                // zeros is worth the four compares. Written out rather than as a tuple comparison,
-                // which does not reduce to four compares.
-                if (s0 == 0f && s1 == 0f && s2 == 0f && s3 == 0f)
+                for (; j <= columns - block; j += block)
                 {
-                    continue;
+                    RegisterQuad(a, b, y, k, n, row + i, column + j);
                 }
+            }
 
-                AccumulateQuad(
-                    ref Unsafe.Add(ref bRef, (p * n) + column),
-                    ref dest0, ref dest1, ref dest2, ref dest3,
-                    columns, s0, s1, s2, s3);
+            if (j < columns)
+            {
+                MemoryQuad(a, b, y, k, n, row + i, column + j, columns - j);
             }
         }
 
@@ -674,6 +665,127 @@ public static class Gemm
                     Kernels.AddScaled(destination, b.Slice((p * n) + column, columns), scale);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Four output rows by sixteen columns, held in eight vector registers for the whole
+    /// reduction.
+    /// </summary>
+    private static void RegisterQuad(
+        ReadOnlySpan<float> a,
+        ReadOnlySpan<float> b,
+        Span<float> y,
+        int k,
+        int n,
+        int row,
+        int column)
+    {
+        int width = Vector256<float>.Count;
+
+        Vector256<float> c00 = Vector256<float>.Zero;
+        Vector256<float> c01 = Vector256<float>.Zero;
+        Vector256<float> c10 = Vector256<float>.Zero;
+        Vector256<float> c11 = Vector256<float>.Zero;
+        Vector256<float> c20 = Vector256<float>.Zero;
+        Vector256<float> c21 = Vector256<float>.Zero;
+        Vector256<float> c30 = Vector256<float>.Zero;
+        Vector256<float> c31 = Vector256<float>.Zero;
+
+        ref float aRef = ref MemoryMarshal.GetReference(a);
+        ref float bRef = ref MemoryMarshal.GetReference(b);
+        int base0 = row * k;
+
+        for (int p = 0; p < k; p++)
+        {
+            float s0 = Unsafe.Add(ref aRef, base0 + p);
+            float s1 = Unsafe.Add(ref aRef, base0 + k + p);
+            float s2 = Unsafe.Add(ref aRef, base0 + (2 * k) + p);
+            float s3 = Unsafe.Add(ref aRef, base0 + (3 * k) + p);
+
+            // Masks and attention weights are genuinely sparse; skipping a whole quad of zeros is
+            // worth the four compares. Written out rather than as a tuple comparison, which does
+            // not reduce to four compares.
+            if (s0 == 0f && s1 == 0f && s2 == 0f && s3 == 0f)
+            {
+                continue;
+            }
+
+            nuint offset = (nuint)((p * n) + column);
+            Vector256<float> b0 = Vector256.LoadUnsafe(ref bRef, offset);
+            Vector256<float> b1 = Vector256.LoadUnsafe(ref bRef, offset + (nuint)width);
+
+            c00 = Vector256.FusedMultiplyAdd(b0, Vector256.Create(s0), c00);
+            c01 = Vector256.FusedMultiplyAdd(b1, Vector256.Create(s0), c01);
+            c10 = Vector256.FusedMultiplyAdd(b0, Vector256.Create(s1), c10);
+            c11 = Vector256.FusedMultiplyAdd(b1, Vector256.Create(s1), c11);
+            c20 = Vector256.FusedMultiplyAdd(b0, Vector256.Create(s2), c20);
+            c21 = Vector256.FusedMultiplyAdd(b1, Vector256.Create(s2), c21);
+            c30 = Vector256.FusedMultiplyAdd(b0, Vector256.Create(s3), c30);
+            c31 = Vector256.FusedMultiplyAdd(b1, Vector256.Create(s3), c31);
+        }
+
+        ref float yRef = ref MemoryMarshal.GetReference(y);
+        nuint destination = (nuint)((row * n) + column);
+        c00.StoreUnsafe(ref yRef, destination);
+        c01.StoreUnsafe(ref yRef, destination + (nuint)width);
+        c10.StoreUnsafe(ref yRef, destination + (nuint)n);
+        c11.StoreUnsafe(ref yRef, destination + (nuint)(n + width));
+        c20.StoreUnsafe(ref yRef, destination + (nuint)(2 * n));
+        c21.StoreUnsafe(ref yRef, destination + (nuint)((2 * n) + width));
+        c30.StoreUnsafe(ref yRef, destination + (nuint)(3 * n));
+        c31.StoreUnsafe(ref yRef, destination + (nuint)((3 * n) + width));
+    }
+
+    /// <summary>
+    /// Four output rows over a column range too narrow for <see cref="RegisterQuad"/>,
+    /// accumulated in memory.
+    /// </summary>
+    private static void MemoryQuad(
+        ReadOnlySpan<float> a,
+        ReadOnlySpan<float> b,
+        Span<float> y,
+        int k,
+        int n,
+        int row,
+        int column,
+        int columns)
+    {
+        Span<float> d0 = y.Slice((row * n) + column, columns);
+        Span<float> d1 = y.Slice(((row + 1) * n) + column, columns);
+        Span<float> d2 = y.Slice(((row + 2) * n) + column, columns);
+        Span<float> d3 = y.Slice(((row + 3) * n) + column, columns);
+
+        d0.Clear();
+        d1.Clear();
+        d2.Clear();
+        d3.Clear();
+
+        ref float aRef = ref MemoryMarshal.GetReference(a);
+        ref float bRef = ref MemoryMarshal.GetReference(b);
+        ref float dest0 = ref MemoryMarshal.GetReference(d0);
+        ref float dest1 = ref MemoryMarshal.GetReference(d1);
+        ref float dest2 = ref MemoryMarshal.GetReference(d2);
+        ref float dest3 = ref MemoryMarshal.GetReference(d3);
+
+        int base0 = row * k;
+
+        for (int p = 0; p < k; p++)
+        {
+            float s0 = Unsafe.Add(ref aRef, base0 + p);
+            float s1 = Unsafe.Add(ref aRef, base0 + k + p);
+            float s2 = Unsafe.Add(ref aRef, base0 + (2 * k) + p);
+            float s3 = Unsafe.Add(ref aRef, base0 + (3 * k) + p);
+
+            if (s0 == 0f && s1 == 0f && s2 == 0f && s3 == 0f)
+            {
+                continue;
+            }
+
+            AccumulateQuad(
+                ref Unsafe.Add(ref bRef, (p * n) + column),
+                ref dest0, ref dest1, ref dest2, ref dest3,
+                columns, s0, s1, s2, s3);
         }
     }
 

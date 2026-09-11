@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PaddleOcrSharp.Core;
 using PaddleOcrSharp.Formats.Paddle;
 
@@ -226,8 +228,11 @@ internal static class LinearOps
         ReadOnlySpan<float> scales = scale.FloatSpan;
         ReadOnlySpan<float> biases = bias.FloatSpan;
 
-        float[] multiplier = new float[channels];
-        float[] offset = new float[channels];
+        // Per-channel affine constants, pooled: two arrays a call is 12 KiB, and this operator
+        // runs 105 times over a layout detection.
+        using PooledBuffer constants = TensorPool.Rent(channels * 2);
+        Span<float> multiplier = constants.Span[..channels];
+        Span<float> offset = constants.Span.Slice(channels, channels);
         for (int c = 0; c < channels; c++)
         {
             float inverse = 1f / MathF.Sqrt(variances[c] + epsilon);
@@ -235,21 +240,68 @@ internal static class LinearOps
             offset[c] = biases[c] - (means[c] * multiplier[c]);
         }
 
-        for (int n = 0; n < batch; n++)
+        // At inference this is one affine pass per channel plane, and the planes are independent,
+        // so it threads over them and each is a vector multiply-add. Element at a time and on one
+        // thread — which is what it was — the operator cost 156 ms of a 3.5 s detection.
+        Scale(input.Floats!, result.Floats!, multiplier, offset, batch, channels, spatial);
+
+        return result;
+    }
+
+    /// <summary>Applies one multiplier and offset per channel plane, planes in parallel.</summary>
+    private static void Scale(
+        float[] source,
+        float[] destination,
+        ReadOnlySpan<float> multiplier,
+        ReadOnlySpan<float> offset,
+        int batch,
+        int channels,
+        int spatial)
+    {
+        // Copied out because a lambda may not close over a span.
+        float[] scale = TensorPool.RentArray(channels);
+        float[] shift = TensorPool.RentArray(channels);
+        multiplier.CopyTo(scale);
+        offset.CopyTo(shift);
+
+        Parallel.For(0, batch * channels, Parallelism.Options, plane =>
         {
-            for (int c = 0; c < channels; c++)
+            int c = plane % channels;
+            int start = plane * spatial;
+            Affine(source.AsSpan(start, spatial), scale[c], shift[c], destination.AsSpan(start, spatial));
+        });
+
+        TensorPool.Return(scale);
+        TensorPool.Return(shift);
+    }
+
+    /// <summary><c>y = x * scale + shift</c> over one plane.</summary>
+    /// <remarks>
+    /// `TensorPrimitives` has no scalar-multiplier multiply-add, and doing it as a
+    /// multiply then an add is two passes over the plane where the arithmetic needs one.
+    /// </remarks>
+    private static void Affine(ReadOnlySpan<float> source, float scale, float shift, Span<float> destination)
+    {
+        int i = 0;
+
+        if (Simd.Use256 && source.Length >= Vector256<float>.Count)
+        {
+            Vector256<float> m = Vector256.Create(scale);
+            Vector256<float> o = Vector256.Create(shift);
+            ref float x = ref MemoryMarshal.GetReference(source);
+            ref float y = ref MemoryMarshal.GetReference(destination);
+
+            for (; i <= source.Length - Vector256<float>.Count; i += Vector256<float>.Count)
             {
-                int start = ((n * channels) + c) * spatial;
-                float m = multiplier[c];
-                float o = offset[c];
-                for (int i = 0; i < spatial; i++)
-                {
-                    destination[start + i] = (source[start + i] * m) + o;
-                }
+                Vector256.FusedMultiplyAdd(Vector256.LoadUnsafe(ref x, (nuint)i), m, o)
+                    .StoreUnsafe(ref y, (nuint)i);
             }
         }
 
-        return result;
+        for (; i < source.Length; i++)
+        {
+            destination[i] = (source[i] * scale) + shift;
+        }
     }
 
     private static int[] Promote(int[] shape) => shape.Length switch
