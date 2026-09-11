@@ -124,12 +124,13 @@ public static class ParseCommand
         var pages = new List<ParsedPage>();
         int dpi = command.GetInt("dpi", PdfRasterizer.DefaultDpi);
         int maxPages = command.GetInt("max-pages", 0);
+        bool capToSource = command.GetBool("cap-dpi-to-source", true);
         int pageIndex = 0;
 
         foreach (string path in command.Positional)
         {
             foreach ((RgbImage image, string label) in LoadPages(
-                path, dpi, maxPages, command.Get("password"), stages))
+                path, dpi, maxPages, capToSource, command.Get("password"), stages))
             {
                 using (image)
                 {
@@ -209,6 +210,7 @@ public static class ParseCommand
         string path,
         int dpi,
         int maxPages,
+        bool capToSource,
         string? password,
         PageProfile? stages)
     {
@@ -230,7 +232,8 @@ public static class ParseCommand
         // Measuring the MoveNext rather than the whole loop is what keeps the render out of the
         // recognition it is interleaved with.
         int index = 0;
-        using IEnumerator<RgbImage> rendered = PdfRasterizer.Render(path, dpi, password, maxPages)
+        using IEnumerator<RgbImage> rendered = PdfRasterizer
+            .Render(path, dpi, password, maxPages, capToSource)
             .GetEnumerator();
 
         while (true)

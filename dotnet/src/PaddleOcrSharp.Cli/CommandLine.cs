@@ -83,6 +83,7 @@ public sealed class CommandLine
         "merge-tables",
         "title-levels",
         "stop-on-repetition",
+        "cap-dpi-to-source",
         "calibrate",
         "gemm",
         "help",
