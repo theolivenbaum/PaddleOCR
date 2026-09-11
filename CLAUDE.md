@@ -440,6 +440,60 @@ blocks, before the early stop below:
 Both runaway blocks stopped only on the 8192-token budget, and every token past the first few
 hundred was discarded by `RepetitionTruncator` immediately afterwards.
 
+### Render resolution has a ceiling, and the scan sets it
+
+A scanned PDF is a photograph of a page wrapped in a page box, and the photograph has a fixed pixel
+count. Rendering it above that interpolates rather than reveals — the renderer emits more pixels,
+the tower encodes proportionally more patches, and the model reads the same characters. PDFium
+reports the number per image object, after the placement matrix that scales the image onto the
+page, and **every one of the fifteen scans in `test_documents/pdf_scanned` comes back the same: 96
+dpi, one image object, 100% page coverage, no text layer.**
+
+Five document/source pairs at 72, 96, 144, 200 and 300 dpi — 25 parses — scored on character
+accuracy against `ground_truth/pdf` (1 − CER, both sides stripped of markup):
+
+| | 72 | 96 | 144 | 200 | 300 |
+| --- | --- | --- | --- | --- | --- |
+| `nougat_004` scan | 0.2870 / 59 s | 0.2870 / 58 s | 0.2870 / 68 s | 0.2870 / 84 s | 0.2870 / 145 s |
+| `nougat_012` scan | 0.9732 / 467 s | 0.9728 / 503 s | 0.9728 / 713 s | 0.9730 / 975 s | **0.9495** / 1,496 s |
+| `code_and_formula` scan | 0.9928 / 280 s | 0.9928 / 392 s | 0.9928 / 586 s | 0.9928 / 809 s | 0.9928 / 987 s |
+| `code_and_formula` digital | 0.9926 / 215 s | 0.9928 / 214 s | 0.9928 / 239 s | 0.9928 / 307 s | 0.9928 / 582 s |
+
+**Accuracy varies by 0.02 points across the whole sweep**, against up to 3.5x the wall time. The
+figure document is identical to four decimals at all five settings on both sources.
+
+Two things in that table are worth more than the headline. The first is that the **digital original
+behaves the same way**, which is what rules out "the scan is the problem" as the explanation:
+`smart_resize` clamps every crop to between 112,896 and 1,003,520 pixels, so at 72 dpi all sixteen
+of that document's blocks sit on the 576-patch floor and the dpi setting reaches nothing at all. At
+300 the body-text blocks finally reach 4,368 patches — seven times the resolution actually fed to
+the tower — and accuracy moves from 0.9926 to 0.9928.
+
+The second is the one place accuracy *fell*. `nougat_012` at 300 dpi loses 2.4 points, and it is
+not a recognition failure — 1,319 generated tokens against 1,324 at 72, and the text it produced is
+the same. **The page lost its title block.** The layout detector sees an 800x800 resize of whatever
+was rendered, whatever the dpi; interpolating the scan 3.1x before that resize changed the pixels
+it reduces, and the box fell below the score threshold. Over-rendering is not only wasted work, it
+perturbs the one stage whose input resolution is fixed.
+
+So `PdfRasterizer` renders at the lower of the dpi requested and what the page can supply. It never
+raises the figure, and it lowers it only for a page that puts no visible text or vector art down and
+whose images cover essentially all of it — an invisible OCR text layer over a scan does not
+disqualify it, tiled images take the highest of their resolutions, and a page it cannot inspect is
+rendered exactly as asked. `--cap-dpi-to-source false` turns it off. On this corpus that is 96 dpi
+and about 30% of a page's wall time, with the markdown unchanged.
+
+The resolution comes from `FPDFImageObj_GetImageMetadata`, which needs a `LibraryImport` because
+PDFtoImage binds only `FPDF_InitLibrary` and `FPDF_DestroyLibrary` and exposes no page-object API.
+It is not a new dependency — PDFium is already loaded in the process to render — but it does lean
+on PDFtoImage leaving the library initialised, which is real behaviour and not a documented
+contract, so every failure path returns "unknown" and the page is rendered at the dpi asked for.
+
+What this does not establish: five documents from one corpus, all of whose scans happen to be 96
+dpi. A genuinely low-resolution scan would sit below the model's pixel floor for small blocks and
+might well reward more dpi; nothing here measures that. The claim is narrower — rendering above what
+the source holds is measurable cost and unmeasurable gain.
+
 ### Stopping a decode that has fallen into a cycle
 
 `GenerationOptions.StopOnRepetition` (on by default; `--stop-on-repetition false` to disable) ends a
@@ -902,6 +956,12 @@ named beside them:
 | Render the page, HTML decoration and all | `MarkdownConverter`, `build_handle_funcs_dict` |
 | Rejoin a table split by a page break | `merge_tables_across_pages` |
 | Decide how deep each heading sits | `assign_levels_to_parsing_res` |
+
+A fourth deliberate divergence lives in the rasteriser rather than in this table: **a scanned page
+is rendered at its own resolution when that is below the dpi requested** — see "Render resolution
+has a ceiling, and the scan sets it". Upstream renders every PDF at a fixed `zoom=2.0` and adapts
+only to keep a very large page inside a memory budget, so on a scan the port now rasterises fewer
+pixels than PaddleX does and its output is no longer byte-identical there.
 
 Three places diverge from upstream on purpose, and each says so where it is implemented: the
 token glyphs painted over a table's figures (SkiaSharp, not OpenCV's Hershey font), the
