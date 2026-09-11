@@ -271,3 +271,32 @@ orientation classifier.*
       the activation feeding it. **Unmeasured** — a candidate, not a result.
 - [ ] A direct convolution kernel for the backbone's small stride-1 shapes, where the im2col
       column buffer plausibly costs more than the multiply-adds it feeds. **Unmeasured.**
+
+## Closing the layout gap against upstream
+
+- [x] `conv2d` reached `Gemm.MatMul`'s `k x n` form, which accumulates output rows in memory at one
+      load and one store per multiply-add. Posed instead as the shape `Gemm.Linear` wants — filters
+      as the activation rows, im2col columns as the weight panel, over a block of output rows —
+      **81 -> ~180 GFLOP/s**, and the product lands in `[channel, pixel]` order so it copies out
+      rather than transposing. **-10% of the stage.**
+- [x] Nothing outside `conv2d` was threaded. `Parallelism.Chunked` is the one place that split now
+      lives, and `Broadcast.Seed` lets a walk start somewhere other than zero so the counter-based
+      operators can split too. **-31% of the stage**, the largest single item.
+- [x] `batch_norm_` scalar and unpooled (156 -> 34 ms), `any` over a contiguous suffix through the
+      generic reduction (68 ms -> off the profile), `depthwise_conv2d` bounds-checking 25 taps per
+      output pixel at 3.7 GFLOP/s (149 -> 41 ms), `einsum` rebuilding both operands' offsets for
+      each of 23 million terms (88 -> 45 ms).
+- [x] `Gemm.MatMul`'s direct tile register-blocked, four rows by two vectors held across the
+      reduction — the vision tower's store-port bound again. matmul 221 -> 178 ms. `Gemm.Linear`
+      no longer copies a float32 panel it has nothing to widen.
+- [x] Tiered compilation off for the CLI. Every run of the tool is a cold process, so nothing ever
+      reaches the steady state tiering is for: page 10712/10036 -> 8149/8352 ms. The library is
+      untouched. ReadyToRun measured worse and is not taken.
+- [x] End to end, both sides in one shell run: **1.89x, 1.98x and 7.55x**, with the layout stage
+      at 3.4-3.5 s per cold process against upstream's 3.0 s cold and 2.2 s warm — from 3x behind
+      to parity cold and ~1.6x warm. Byte-identical output on all four test pages.
+- [ ] What is left in `conv2d` is ~65% GEMM at ~180 GFLOP/s, ~30% im2col fill, ~5% copy-out.
+      Closing it needs a GEMM that blocks the reduction as well as the output: `Linear` sweeps its
+      panel once per four activation rows, which is 0.5 bytes per flop from L2 whatever the panel
+      width. That is a change to the kernel both model halves depend on, so it wants its own
+      measurement pass with the vision tower as a control.
