@@ -129,6 +129,16 @@ public static class Kernels
         int length = values.Length;
         int i = 0;
 
+        if (Simd.Use512 && length >= Vector512<float>.Count)
+        {
+            Vector512<float> wide = Vector512.Create(1f);
+            for (; i <= length - Vector512<float>.Count; i += Vector512<float>.Count)
+            {
+                Vector512<float> x = Vector512.LoadUnsafe(in values[i]);
+                (x * (wide / (wide + Exp(-x)))).StoreUnsafe(ref values[i]);
+            }
+        }
+
         if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> one = Vector256.Create(1f);
@@ -168,6 +178,23 @@ public static class Kernels
         int length = values.Length;
         int i = 0;
 
+        if (Simd.Use512 && length >= Vector512<float>.Count)
+        {
+            Vector512<float> half = Vector512.Create(0.5f);
+            Vector512<float> one = Vector512.Create(1f);
+            Vector512<float> two = Vector512.Create(2f);
+            Vector512<float> alpha = Vector512.Create(SqrtTwoOverPi);
+            Vector512<float> beta = Vector512.Create(GeluTanhCoefficient);
+
+            for (; i <= length - Vector512<float>.Count; i += Vector512<float>.Count)
+            {
+                Vector512<float> x = Vector512.LoadUnsafe(in values[i]);
+                Vector512<float> inner = alpha * (x + (beta * x * x * x));
+                Vector512<float> tanh = (two / (one + Exp(-two * inner))) - one;
+                (half * x * (one + tanh)).StoreUnsafe(ref values[i]);
+            }
+        }
+
         if (Simd.Use256 && length >= Vector256<float>.Count)
         {
             Vector256<float> half = Vector256.Create(0.5f);
@@ -194,6 +221,23 @@ public static class Kernels
             values[i] = 0.5f * x * (1f + MathF.Tanh(inner));
         }
     }
+
+    /// <summary>
+    /// <see cref="GeluTanh(Span{float})"/> over a whole activation matrix, split across threads.
+    /// </summary>
+    /// <param name="values">Values to transform in place.</param>
+    /// <remarks>
+    /// The vision MLP hands this <c>patches x 4304</c> floats a layer — twenty-two million at a
+    /// full-budget block — and every one of them costs an <c>exp</c> and a divide. It is a pass
+    /// over independent elements, so there is nothing to it but the split.
+    /// </remarks>
+    public static void GeluTanhParallel(Memory<float> values) =>
+        Parallelism.Chunked(values.Length, (start, end) => GeluTanh(values.Span[start..end]));
+
+    /// <summary><see cref="Silu(Span{float})"/> over a whole activation matrix, split across threads.</summary>
+    /// <param name="values">Values to transform in place.</param>
+    public static void SiluParallel(Memory<float> values) =>
+        Parallelism.Chunked(values.Length, (start, end) => Silu(values.Span[start..end]));
 
     /// <summary>
     /// In-place softmax over <paramref name="values"/>, computed in float32 exactly as
@@ -246,6 +290,85 @@ public static class Kernels
         }
     }
 
+    /// <summary>
+    /// In-place <c>softmax(values · scale)</c>, for a positive <paramref name="scale"/>.
+    /// </summary>
+    /// <param name="values">Unscaled scores; receives the softmax weights.</param>
+    /// <param name="scale">Softmax temperature, normally <c>1 / sqrt(headDim)</c>. Must be positive.</param>
+    /// <remarks>
+    /// <para>
+    /// Bit-identical to <c>Scale</c> followed by <see cref="Softmax"/>, and one pass cheaper.
+    /// Scaling by a positive float is monotonic, so the scaled row's maximum is the scaled
+    /// maximum of the raw row — the same element, and the same single multiply, so the same
+    /// float32 value. The scaled score itself is then produced in a register where the separate
+    /// pass wrote it to memory and read it back.
+    /// </para>
+    /// <para>
+    /// Attention is where that pass is worth removing: the row is the whole key sequence, so a
+    /// 27-layer tower over a 5000-patch block writes and re-reads eleven billion floats for it.
+    /// </para>
+    /// </remarks>
+    public static void ScaledSoftmax(Span<float> values, float scale)
+    {
+        if (values.IsEmpty)
+        {
+            return;
+        }
+
+        float max = TensorPrimitives.Max(values) * scale;
+        if (float.IsNegativeInfinity(max))
+        {
+            values.Fill(0f);
+            return;
+        }
+
+        float sum = 0f;
+        int index = 0;
+
+        if (Simd.Use512 && values.Length >= Vector512<float>.Count)
+        {
+            Vector512<float> shift = Vector512.Create(max);
+            Vector512<float> factor = Vector512.Create(scale);
+            Vector512<float> total = Vector512<float>.Zero;
+
+            for (; index <= values.Length - Vector512<float>.Count; index += Vector512<float>.Count)
+            {
+                Vector512<float> e = Exp((Vector512.LoadUnsafe(in values[index]) * factor) - shift);
+                e.StoreUnsafe(ref values[index]);
+                total += e;
+            }
+
+            sum = Vector512.Sum(total);
+        }
+        else if (Simd.Use256 && values.Length >= Vector256<float>.Count)
+        {
+            Vector256<float> shift = Vector256.Create(max);
+            Vector256<float> factor = Vector256.Create(scale);
+            Vector256<float> total = Vector256<float>.Zero;
+
+            for (; index <= values.Length - Vector256<float>.Count; index += Vector256<float>.Count)
+            {
+                Vector256<float> e = Exp((Vector256.LoadUnsafe(in values[index]) * factor) - shift);
+                e.StoreUnsafe(ref values[index]);
+                total += e;
+            }
+
+            sum = Vector256.Sum(total);
+        }
+
+        for (; index < values.Length; index++)
+        {
+            float e = MathF.Exp((values[index] * scale) - max);
+            values[index] = e;
+            sum += e;
+        }
+
+        if (sum > 0f)
+        {
+            TensorPrimitives.Multiply(values, 1f / sum, values);
+        }
+    }
+
     /// <summary>Numerically stable error function, matching <c>std::erf</c> to ~1e-7.</summary>
     public static float Erf(float x)
     {
@@ -264,6 +387,32 @@ public static class Kernels
         float t = 1f / (1f + (P * ax));
         float y = 1f - ((((((((A5 * t) + A4) * t) + A3) * t) + A2) * t) + A1) * t * MathF.Exp(-ax * ax);
         return sign * y;
+    }
+
+    /// <summary>The same <c>exp</c> over 512-bit vectors.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<float> Exp(Vector512<float> x)
+    {
+        Vector512<float> log2E = Vector512.Create(1.44269504088896341f);
+        Vector512<float> ln2Hi = Vector512.Create(0.693359375f);
+        Vector512<float> ln2Lo = Vector512.Create(-2.12194440e-4f);
+
+        Vector512<float> clamped = Vector512.Min(Vector512.Max(x, Vector512.Create(-88f)), Vector512.Create(88f));
+        Vector512<float> k = Vector512.Round(clamped * log2E);
+        Vector512<float> r = Vector512.FusedMultiplyAdd(k, -ln2Hi, clamped);
+        r = Vector512.FusedMultiplyAdd(k, -ln2Lo, r);
+
+        Vector512<float> p = Vector512.Create(1.9875691500e-4f);
+        p = Vector512.FusedMultiplyAdd(p, r, Vector512.Create(1.3981999507e-3f));
+        p = Vector512.FusedMultiplyAdd(p, r, Vector512.Create(8.3334519073e-3f));
+        p = Vector512.FusedMultiplyAdd(p, r, Vector512.Create(4.1665795894e-2f));
+        p = Vector512.FusedMultiplyAdd(p, r, Vector512.Create(1.6666665459e-1f));
+        p = Vector512.FusedMultiplyAdd(p, r, Vector512.Create(5.0000001201e-1f));
+        p = Vector512.FusedMultiplyAdd(p, r * r, r);
+        p += Vector512.Create(1f);
+
+        Vector512<int> exponent = (Vector512.ConvertToInt32(k) + Vector512.Create(127)) << 23;
+        return p * exponent.AsSingle();
     }
 
     /// <summary>Vectorised <c>exp</c> with float32 accuracy, used by the activation kernels.</summary>

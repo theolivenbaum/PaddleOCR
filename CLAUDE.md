@@ -771,6 +771,169 @@ Two earlier notes in this section are superseded rather than wrong. The isolated
 product's lane reduction is "the cost whatever the tile" holds only while the tile keeps reducing
 along the lanes — the point of transposing is to stop.
 
+### The worst page in the corpus, and what it was actually spending
+
+The pages this section was tuned against are all a few blocks of a letter-sized scan. Over
+`test_documents`, one page each, the slowest are a different shape:
+
+| Page | Before |
+| --- | --- |
+| `pdf_scanned/nougat_010_scanned.pdf` p1 | **468.8 s** |
+| `pdf_scanned/code_and_formula_scanned.pdf` p1 | 172.8 s |
+| `images/balance_sheet_1.png` | 144.4 s |
+| `pdf_scanned/docling_scanned.pdf` p1 | 125.3 s |
+| `images/ocr_image.jpg` | 73.1 s |
+
+`nougat_010` is forty-three blocks and 51,716 patches, and its profile splits 323.5 s of vision,
+85.4 s of decode, 49.4 s of prefill and 5.1 s of layout. Two things about it are worth naming
+before any kernel, because both are properties of the page rather than of the code.
+
+**Its MediaBox is a lie.** The page declares 4967x3508 points — 69 inches by 49 — and holds one
+6623x4678 JPEG whose aspect ratio is √2 to three decimals, so the thing that was scanned is an
+A-series page in landscape. A dpi is a resolution per inch of the page the file claims to be, so
+144 dpi renders it to 9934x7017: seventy megapixels, of which thirty-one carry the scan and the
+rest are interpolation. Upstream renders it the same way and takes longer still.
+
+**Forty-three small blocks each pay a floor.** `min_pixels = 112_896` is a lower bound on what
+`smart_resize` hands the tower, which is 576 patches — so twenty-two one-line headings cost 576
+patches each however few pixels they actually occupy. Twenty-four thousand of the page's patches
+are that floor, and no change to the page's resolution moves them.
+
+#### Where it went
+
+Six changes, each measured on its own, took the page to **240.1 s at the defaults** — 1.95x — with
+the recognised text equal or better (see below). None of them is specific to this page; over the
+five slowest pages in the corpus they are worth 984.4 s → 624.4 s, and every one of those pages but
+this one comes out byte-identical.
+
+| Page | Before | After |
+| --- | --- | --- |
+| `nougat_010_scanned.pdf` p1 | 468.8 s | **240.1 s** (218.2 s at `--block-concurrency 2`) |
+| `code_and_formula_scanned.pdf` p1 | 172.8 s | 120.6 s |
+| `balance_sheet_1.png` | 144.4 s | 108.7 s |
+| `docling_scanned.pdf` p1 | 125.3 s | 103.0 s |
+| `ocr_image.jpg` | 73.1 s | 52.0 s |
+| **total** | **984.4 s** | **624.4 s** |
+
+- **The vision tower's attention had no 512-bit path.** `Vector512.IsHardwareAccelerated` is true
+  on this machine — the runtime's preferred width is 512 here, unlike the machine the note under
+  "Things that looked like wins" was written on — so `Gemm`'s `Dot4x4` had been running as `zmm`
+  all along while `AttentionKernels` stayed at 256 bits, and attention is a third to two thirds of
+  the tower. Widening it is **bit-identical**, which is what makes it safe to choose on vector
+  width alone: in both the score and the value product the lanes are output columns and the
+  reduction steps along them one at a time, so every output accumulates its terms in exactly the
+  order the narrow kernel accumulates them. Interleaved over two rounds at 2916 patches, the tower
+  went **20.1/19.0 s → 16.9/16.0 s**.
+- **`softmax(scale · x)` is one pass cheaper than `scale` then `softmax`.** Scaling by a positive
+  float is monotonic, so the scaled row's maximum is the scaled maximum of the raw row — the same
+  element and the same single multiply, hence the same float32 value — and the scaled score can be
+  produced in a register where the separate pass wrote it to memory and read it back. Also
+  bit-identical, and attention is where it is worth removing: the row is the whole key sequence, so
+  a 27-layer tower over a 5000-patch block writes and re-reads eleven billion floats for it.
+- **The head shuffles, the GELU and the SiLU ran on one core.** Between the matrix products the
+  tower moves `patches x 1152` floats four times a layer — 24 MB at a full-budget block — and
+  applies an `exp` and a divide to `patches x 4304` more. Both are passes over independent
+  elements and both now use the same worker count as the products beside them.
+- **The panel counts did not divide across the workers.** `ChoosePanelWidth` sized a panel for L2
+  and stopped there, which at the tower's own 1152-column shape gives ten panels for four workers:
+  two of them finish a third early. That is the whole gap between the qkv and output projections at
+  190 GFLOP/s and the MLP products at 244 — the MLP's 4304 columns happen to divide into
+  thirty-eight, close enough that the tail costs nothing. Rounding the count up rather than the
+  width down keeps every panel inside L2 and gives each worker the same number: qkv 192 → 210
+  GFLOP/s, output 188 → 223, and the tower 16.4 → 15.8 s.
+- **Blocks are decoded as a batch.** A decode step reads all 255M decoder parameters and the
+  106M-parameter output head to produce one token — 646 MB of bfloat16 — so it is bound by how fast
+  the weights arrive. Blocks on a page are independent, and stepping them together reads those
+  weights once for the whole batch, which turns a page's decode into as many weight sweeps as its
+  longest block needs rather than as many as all of them put together need. On this page, with the
+  same 1,740 tokens generated either way:
+
+  | decode batch | decode |
+  | --- | --- |
+  | 1 (before) | 85.4 s |
+  | 8 | 39.0 s |
+  | 16 | 28.5 s |
+  | all 43 | **18.2 s** |
+
+  What bounds a batch is memory, not a count: every member holds its own cache for as long as the
+  batch runs, and a block's cache is proportional to its prompt. `DecodeBatch` therefore defaults
+  to 0 — as many blocks as `DecodeBatchBytes` allows — so a page of forty headings decodes in one
+  pass while a page of full-budget blocks still splits. The batched step is the one place the port
+  now diverges numerically from itself: four or more rows reach `Gemm.Linear`'s widened-panel
+  kernel where one row reaches its fused one, and the two group the same products differently.
+  `BatchedDecodeTests` pins a batched row against the same sequence stepped on its own.
+- **The decode kernel was waiting for memory it could have asked for earlier.** A decode step
+  reads all 646 MB and reuses none of it, so `Gemm.Linear`'s single-row kernel is bound by line
+  arrival and nothing else. The fix is a software prefetch, and *where* it points is the whole
+  thing: a row of this model is two to six kilobytes and the loop crosses one in far less than the
+  memory latency, so a prefetch that stays inside the current row arrives too late to be worth
+  anything — measured, exactly neutral over two rounds. Pointing it at `i + 4·Cols` instead, the
+  four rows the next call will read, covers one line per row per two steps, which is the rate the
+  loop consumes them at. On `balance_sheet_1.png`, whose 1,503 tokens come from two blocks and so
+  have nothing to batch with, **decode went 91.5/91.1 s → 63.9/64.5 s** and the page 137.9/135.3 s
+  → 108.7/109.3 s, with identical output. It does nothing for a batched decode, which reaches four
+  or more rows and so takes the widened-panel kernel, whose weight read is one long sequential
+  stream the hardware already handles.
+- **A page raster has a pixel budget.** `PdfRasterizer.DefaultMaxPagePixels` is twelve megapixels;
+  a page that would exceed it is rendered at the resolution that fits. The budget is set to leave
+  every ordinary page alone — most of `pdf_scanned` declares 1275x1650 points, which is a letter
+  page written in 150-dpi pixels and renders to 8.4 megapixels, and all of those come out
+  byte-identical — while catching the two files that are not mild: `nougat_010` at seventy
+  megapixels and `nougat_009_scanned.pdf`, which claims to be 87 inches tall, at twenty-seven. On
+  `nougat_010` it takes the patch count from 51,716 to 36,588. **Eight megapixels is the wrong
+  budget** and was tried first: it clips the mis-declared letter scans by 3%, which moves their
+  layout boxes and so their figure filenames, for nothing.
+
+`--block-concurrency` now applies to the vision tower inside a batch — the token loop is already
+shared — and narrows the kernels inside a block to match, so the two settings no longer multiply
+into more threads than cores. It is worth 240.1 → 218.2 s here and is left off by default, because
+the win is a property of blocks small enough to leave a core idle: four is worse than two even on
+this page (222.5 s).
+
+#### What it produces
+
+Six further pages parsed with both builds, one page each: five byte-identical, and `nougat_004`
+identical once the budget was raised off eight megapixels. That corpus went 396.9 s → 308.1 s, and
+`nougat_006_scanned.pdf` — eighteen blocks, the shape the batch is for — 241.4 s → 173.4 s with
+byte-identical markdown.
+
+On `nougat_010` itself the text is not identical, because the page is one of the two the raster
+budget resizes. It is not worse either. Against the 468.8 s run the differences are a hyphen, two
+trailing dots, a trailing space, and one phrase the *new* output recovers that the old one dropped
+(`Tap the … to return to the regular keyboard`, where the old output had `Tap the regular keyboard`). Sixty-two of the seventy megapixels were cost.
+
+#### How much further the resolution knobs go, and what they cost
+
+240 s is where this page lands with upstream's own per-block preprocessing, and it is close to the
+floor for that preprocessing on four cores: 36,588 patches through 27 layers is 30 TFLOP of matrix
+product before attention, and the tower sustains 210-230 GFLOP/s against an isolated GEMM ceiling
+of 270-285. Under a minute means fewer patches, and the only thing left to take them from is the
+`min_pixels` floor that twenty-two headings are sitting on.
+
+Measured, with word similarity against the original 468.8 s output:
+
+| | page | patches | word similarity |
+| --- | --- | --- | --- |
+| defaults | 240.1 s | 36,588 | — |
+| `--block-concurrency 2` | 218.2 s | 36,588 | — |
+| `--min-pixels 28224` | 109.3 s | 14,068 | 0.987 |
+| `--min-pixels 784` | 92.2 s | 10,992 | 0.987 |
+| `--min-pixels 784 --max-page-pixels 2000000 --block-concurrency 2` | **78.1 s** | 9,736 | 0.982 |
+| the same at `--max-page-pixels 1200000` | 76.1 s | 9,208 | 0.969 |
+
+The one to three percent the floor buys is real and is not noise: at the lower floor the model
+stops distinguishing an en dash from a hyphen and a curly quote from a straight one, and it
+lowercased one sentence opening. It also recovers the same dropped phrase. That is a quality
+setting, so it is exposed and not defaulted — `min_pixels` stays at upstream's 112,896.
+
+**Under a minute is not reachable on this machine at a resolution worth reading.** The last two
+rows are within two seconds of each other because once the floor is off, the patch count tracks the
+page area and the page is already down to what its text needs: halving it again means rendering the
+real A4-landscape page at about 70 dpi. What is left at 78 s is 45 s of vision over 9,736 patches —
+8 TFLOP of matrix product, which four cores at the 210-230 GFLOP/s this tower sustains cannot do in
+much less — 12.5 s of prefill, 15.6 s of decode for 1,737 tokens, and 3.5 s of layout. Getting
+under sixty would take a materially better GEMM, not another pass over this pipeline.
+
 ### Things that looked like wins and were not
 
 Each of these is a plausible optimisation that the benchmark rejected. They are recorded because

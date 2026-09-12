@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using PaddleOcrSharp.Core;
 using System.Buffers;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
@@ -191,7 +193,11 @@ public sealed class DocumentParser : IDisposable
             var absorbed = new HashSet<string>(StringComparer.Ordinal);
             int completed = 0;
 
-            void RecognizeGroup(int groupIndex)
+            // Everything a group needs before the model: the stacked crop, the table's figure
+            // placeholders and the prepared image. Kept apart from the model call so a batch of
+            // groups can be built, decoded together and finished together.
+            (BlockGroup Group, int Primary, LayoutBox Region, BlockRequest Request,
+                IReadOnlyList<TokenizedFigure> Tokenized) BuildWork(int groupIndex)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -229,11 +235,8 @@ public sealed class DocumentParser : IDisposable
 
                 try
                 {
-                    using (stages?.Measure("recognize"))
-                    {
-                        blocks[primary] = Recognize(prepared, region, settings, cancellationToken)
-                            with { GroupId = group.GroupId };
-                    }
+                    // `PrepareForModel` copies what it keeps, so both images go back here.
+                    return (group, primary, region, PrepareForModel(prepared, region, settings), tokenized);
                 }
                 finally
                 {
@@ -242,31 +245,96 @@ public sealed class DocumentParser : IDisposable
                         prepared.Dispose();
                     }
                 }
+            }
 
-                if (tokenized.Count > 0)
+            void FinishWork(
+                (BlockGroup Group, int Primary, LayoutBox Region, BlockRequest Request,
+                    IReadOnlyList<TokenizedFigure> Tokenized) work,
+                string raw)
+            {
+                blocks[work.Primary] = Complete(work.Request, raw, settings) with { GroupId = work.Group.GroupId };
+
+                if (work.Tokenized.Count > 0)
                 {
                     // Substituting the placeholders has to wait until every block is recognised,
                     // because a figure's own text goes in beside its image.
-                    tokenizedByBlock[primary] = tokenized;
+                    tokenizedByBlock[work.Primary] = work.Tokenized;
                 }
 
                 // Every region of a merged group keeps its box so the JSON still describes the
                 // page, but only the first carries the recognised text.
-                for (int i = 1; i < group.Indices.Count; i++)
+                for (int i = 1; i < work.Group.Indices.Count; i++)
                 {
-                    int index = group.Indices[i];
+                    int index = work.Group.Indices[i];
                     LayoutBox other = regions[index].ClampTo(page.Width, page.Height);
                     blocks[index] = new ParsedBlock(other.Label, other, string.Empty, other.ReadingOrder)
                     {
-                        GroupId = group.GroupId,
+                        GroupId = work.Group.GroupId,
                     };
                 }
 
                 progress?.Report(new BlockProgress(
-                    Interlocked.Increment(ref completed) - 1, groups.Count, region.Label));
+                    Interlocked.Increment(ref completed) - 1, groups.Count, work.Region.Label));
             }
 
-            if (settings.BlockConcurrency > 1)
+            void RecognizeGroup(int groupIndex)
+            {
+                var work = BuildWork(groupIndex);
+                using BlockRequest request = work.Request;
+
+                string raw = string.Empty;
+                if (request.NeedsModel)
+                {
+                    using (stages?.Measure("recognize"))
+                    {
+                        raw = _model.Recognize(
+                            request.Prepared!,
+                            request.Instruction,
+                            BlockPrompt.Options(work.Region.Label, settings.PixelBudgets),
+                            request.Generation,
+                            settings.Profile,
+                            work.Region.Label,
+                            cancellationToken);
+                    }
+                }
+
+                FinishWork(work, raw);
+            }
+
+            if (settings.DecodeBatch != 1 && groups.Count > 1)
+            {
+                // Batches are closed by the cache they would hold, not by a count: a page of forty
+                // headings decodes in one pass where a page of full-budget blocks still splits.
+                var pending = new List<(BlockGroup Group, int Primary, LayoutBox Region,
+                    BlockRequest Request, IReadOnlyList<TokenizedFigure> Tokenized)>();
+                long pendingBytes = 0;
+
+                for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+                {
+                    var work = BuildWork(groupIndex);
+                    long bytes = EstimateCacheBytes(work.Request, settings);
+
+                    bool full = pending.Count > 0
+                        && (pendingBytes + bytes > settings.DecodeBatchBytes
+                            || (settings.DecodeBatch > 0 && pending.Count >= settings.DecodeBatch));
+
+                    if (full)
+                    {
+                        RecognizeBatch(pending, FinishWork, settings, stages, cancellationToken);
+                        pending = [];
+                        pendingBytes = 0;
+                    }
+
+                    pending.Add(work);
+                    pendingBytes += bytes;
+                }
+
+                if (pending.Count > 0)
+                {
+                    RecognizeBatch(pending, FinishWork, settings, stages, cancellationToken);
+                }
+            }
+            else if (settings.BlockConcurrency > 1)
             {
                 Parallel.For(
                     0,
@@ -374,6 +442,243 @@ public sealed class DocumentParser : IDisposable
         DocumentParserOptions options,
         CancellationToken cancellationToken)
     {
+        using BlockRequest request = PrepareForModel(crop, region, options);
+        if (!request.NeedsModel)
+        {
+            return Complete(request, string.Empty, options);
+        }
+
+        VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label, options.PixelBudgets);
+        string raw = _model.Recognize(
+            request.Prepared!,
+            request.Instruction,
+            preprocessing,
+            request.Generation,
+            options.Profile,
+            region.Label,
+            cancellationToken);
+
+        return Complete(request, raw, options);
+    }
+
+    /// <summary>
+    /// Runs the vision tower over a batch's blocks, <c>BlockConcurrency</c> of them at a time.
+    /// </summary>
+    /// <remarks>
+    /// The tower's own kernels spread over every core, but not perfectly: a block of a few hundred
+    /// patches leaves the fourth core idle for part of every layer, because the norms, the head
+    /// shuffles and the tails of each matrix product are too short to fill it. Encoding two or
+    /// four blocks at once fills those gaps with another block's work, and each one's kernels are
+    /// narrowed to match so the two settings do not multiply into more threads than cores. It is
+    /// off by default because the win is a property of small blocks and the cost is holding
+    /// several blocks' activations at once.
+    /// </remarks>
+    private void EncodeMembers(
+        IReadOnlyList<(BlockGroup Group, int Primary, LayoutBox Region, BlockRequest Request,
+            IReadOnlyList<TokenizedFigure> Tokenized)> works,
+        IReadOnlyList<int> members,
+        (PreprocessedImage Image, Tensor Features, TimeSpan Elapsed)[] encoded,
+        DocumentParserOptions settings,
+        CancellationToken cancellationToken)
+    {
+        int concurrency = Math.Clamp(settings.BlockConcurrency, 1, Math.Max(1, members.Count));
+        if (concurrency == 1)
+        {
+            for (int r = 0; r < members.Count; r++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                encoded[r] = EncodeOne(works[members[r]].Request, works[members[r]].Region, settings);
+            }
+
+            return;
+        }
+
+        int workers = Math.Max(1, (Core.Parallelism.Options.MaxDegreeOfParallelism <= 0
+            ? Environment.ProcessorCount
+            : Core.Parallelism.Options.MaxDegreeOfParallelism) / concurrency);
+
+        var inner = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = workers,
+            CancellationToken = cancellationToken,
+        };
+
+        Parallel.For(
+            0,
+            members.Count,
+            new ParallelOptions { MaxDegreeOfParallelism = concurrency, CancellationToken = cancellationToken },
+            r =>
+            {
+                using Core.Parallelism.Scope scope = Core.Parallelism.Use(inner);
+                encoded[r] = EncodeOne(works[members[r]].Request, works[members[r]].Region, settings);
+            });
+    }
+
+    /// <summary>Preprocesses and encodes one block's crop.</summary>
+    private (PreprocessedImage Image, Tensor Features, TimeSpan Elapsed) EncodeOne(
+        BlockRequest request,
+        LayoutBox region,
+        DocumentParserOptions settings)
+    {
+        long start = Stopwatch.GetTimestamp();
+        PreprocessedImage image = VisionPreprocessor.Preprocess(
+            request.Prepared!, BlockPrompt.Options(region.Label, settings.PixelBudgets));
+        Tensor features = _model.Vision.Encode(image);
+        return (image, features, Stopwatch.GetElapsedTime(start));
+    }
+
+    /// <summary>
+    /// What one block's key/value cache will cost, close enough to size a batch by.
+    /// </summary>
+    /// <remarks>
+    /// The prompt is one token per merged 2x2 patch group plus a dozen of instruction, and the
+    /// patch count follows from the crop's area once the label's pixel budget has clamped it — all
+    /// of which is known before the tower runs. The initial generation allowance matches what
+    /// <c>GenerateBatch</c> reserves; a block that outgrows it simply grows its own cache.
+    /// </remarks>
+    private long EstimateCacheBytes(BlockRequest request, DocumentParserOptions settings)
+    {
+        if (!request.NeedsModel || request.Prepared is not { } crop)
+        {
+            return 0;
+        }
+
+        (int minimum, int maximum) = settings.PixelBudgets.For(request.Region.Label);
+        long pixels = Math.Clamp((long)crop.Width * crop.Height, minimum, maximum);
+
+        int patch = _model.Configuration.Vision.PatchSize;
+        int merge = _model.Configuration.Vision.SpatialMergeSize;
+        long promptTokens = (pixels / ((long)patch * patch * merge * merge)) + 32;
+
+        Models.Language.LanguageConfig language = _model.Configuration.Language;
+        long capacity = promptTokens + Math.Min(request.Generation.MaxNewTokens, 128);
+        return capacity * language.NumHiddenLayers * 2 * language.KeyValueWidth * sizeof(float);
+    }
+
+    /// <summary>
+    /// Encodes and prefills a batch of blocks, then decodes them together, one step for all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The vision tower and the prefill are compute-bound and already use every core, so they run
+    /// per block as before. The token loop is not: it reads 646 MB of weights to produce one
+    /// token, so a page of small blocks spends its decode budget re-reading the same weights one
+    /// block at a time. Stepping the batch together reads them once for the whole batch, and the
+    /// batch costs as many steps as its longest block needs rather than as many as all of them
+    /// together need.
+    /// </para>
+    /// <para>
+    /// The cost is holding the batch's key/value caches at once, which is why the batch is sized
+    /// rather than unbounded.
+    /// </para>
+    /// </remarks>
+    private void RecognizeBatch(
+        IReadOnlyList<(BlockGroup Group, int Primary, LayoutBox Region, BlockRequest Request,
+            IReadOnlyList<TokenizedFigure> Tokenized)> works,
+        Action<(BlockGroup Group, int Primary, LayoutBox Region, BlockRequest Request,
+            IReadOnlyList<TokenizedFigure> Tokenized), string> finish,
+        DocumentParserOptions settings,
+        PageProfile? stages,
+        CancellationToken cancellationToken)
+    {
+        var images = new List<PreprocessedImage>();
+        var embeddings = new List<Tensor>();
+        var requests = new List<PaddleOcrVLModel.BatchedRequest>();
+        var members = new List<int>();
+        var visionTimes = new List<TimeSpan>();
+
+        try
+        {
+            using (stages?.Measure("recognize"))
+            {
+                for (int i = 0; i < works.Count; i++)
+                {
+                    if (works[i].Request.NeedsModel)
+                    {
+                        members.Add(i);
+                    }
+                }
+
+                var encoded = new (PreprocessedImage Image, Tensor Features, TimeSpan Elapsed)[members.Count];
+                EncodeMembers(works, members, encoded, settings, cancellationToken);
+
+                for (int r = 0; r < members.Count; r++)
+                {
+                    images.Add(encoded[r].Image);
+                    embeddings.Add(encoded[r].Features);
+                    visionTimes.Add(encoded[r].Elapsed);
+                    requests.Add(new PaddleOcrVLModel.BatchedRequest(
+                        _model.BuildPrompt(encoded[r].Image.Grid, works[members[r]].Request.Instruction),
+                        encoded[r].Features,
+                        encoded[r].Image.Grid,
+                        works[members[r]].Request.Generation));
+                }
+
+                List<int>[] generated = _model.GenerateBatch(requests, out GenerationStats[] stats, cancellationToken);
+
+                if (settings.Profile is { } profile)
+                {
+                    for (int r = 0; r < requests.Count; r++)
+                    {
+                        ImageGrid grid = requests[r].Grid;
+                        profile.Add(new RecognitionRecord(
+                            works[members[r]].Region.Label,
+                            grid.Height * grid.Width * grid.Temporal,
+                            stats[r].PromptTokens,
+                            stats[r].GeneratedTokens,
+                            stats[r].HitTokenBudget,
+                            stats[r].StoppedEarly,
+                            visionTimes[r],
+                            stats[r].Prefill,
+                            stats[r].Decode,
+                            stats[r].DecodeLogits,
+                            0,
+                            0));
+                    }
+                }
+
+                int next = 0;
+                for (int i = 0; i < works.Count; i++)
+                {
+                    string raw = works[i].Request.NeedsModel
+                        ? _model.Tokenizer.Decode(
+                            generated[next++], works[i].Request.Generation.SkipSpecialTokens)
+                        : string.Empty;
+
+                    finish(works[i], raw);
+                }
+            }
+        }
+        finally
+        {
+            foreach (Tensor features in embeddings)
+            {
+                features.Dispose();
+            }
+
+            foreach (PreprocessedImage image in images)
+            {
+                image.Dispose();
+            }
+
+            foreach (var work in works)
+            {
+                work.Request.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Everything a block needs before the model sees it: the picture it keeps, whether it is sent
+    /// at all, its instruction and its prepared crop.
+    /// </summary>
+    /// <remarks>
+    /// Split out of <see cref="Recognize"/> so a batched decode can run this for several blocks,
+    /// hand the model all of them at once, and finish each with <see cref="Complete"/>. The
+    /// single-block path calls the three in a row and is unchanged by the split.
+    /// </remarks>
+    private BlockRequest PrepareForModel(RgbImage crop, LayoutBox region, DocumentParserOptions options)
+    {
         byte[]? picture = null;
         string? picturePath = null;
 
@@ -389,10 +694,10 @@ public sealed class DocumentParser : IDisposable
 
         if (SkippedByModel(options).Contains(region.Label))
         {
-            return new ParsedBlock(region.Label, region, string.Empty, region.ReadingOrder)
+            return new BlockRequest(region, crop.Width, crop.Height)
             {
-                Image = picture,
-                ImagePath = picturePath,
+                Picture = picture,
+                PicturePath = picturePath,
             };
         }
 
@@ -400,23 +705,41 @@ public sealed class DocumentParser : IDisposable
             ? BlockPrompt.Spotting
             : BlockPrompt.For(region.Label, options.UseChartRecognition, options.UseSealRecognition);
 
-        RgbImage preparedCrop;
+        RgbImage prepared;
         using (options.StageProfile?.Measure("prepare"))
         {
-            preparedCrop = Prepare(crop, region.Label, instruction);
+            prepared = Prepare(crop, region.Label, instruction);
         }
 
-        using RgbImage prepared = preparedCrop;
+        return new BlockRequest(region, crop.Width, crop.Height)
+        {
+            Picture = picture,
+            PicturePath = picturePath,
+            Prepared = prepared,
+            Instruction = instruction,
 
-        // Spotting encodes coordinates as `<|LOC_n|>` tokens, which are special tokens: dropping
-        // them during decoding would erase the geometry the mode exists to produce.
-        GenerationOptions generation = region.Label == "spotting"
-            ? options.Generation with { SkipSpecialTokens = false }
-            : options.Generation;
+            // Spotting encodes coordinates as `<|LOC_n|>` tokens, which are special tokens:
+            // dropping them during decoding would erase the geometry the mode exists to produce.
+            Generation = region.Label == "spotting"
+                ? options.Generation with { SkipSpecialTokens = false }
+                : options.Generation,
+            NeedsModel = true,
+        };
+    }
 
-        VisionPreprocessorOptions preprocessing = BlockPrompt.Options(region.Label, options.PixelBudgets);
-        string raw = _model.Recognize(
-            prepared, instruction, preprocessing, generation, options.Profile, region.Label, cancellationToken);
+    /// <summary>Turns one block's raw model output back into a parsed block.</summary>
+    private static ParsedBlock Complete(BlockRequest request, string raw, DocumentParserOptions options)
+    {
+        LayoutBox region = request.Region;
+
+        if (!request.NeedsModel)
+        {
+            return new ParsedBlock(region.Label, region, string.Empty, region.ReadingOrder)
+            {
+                Image = request.Picture,
+                ImagePath = request.PicturePath,
+            };
+        }
 
         string content = RepetitionTruncator.Truncate(
             raw,
@@ -441,15 +764,39 @@ public sealed class DocumentParser : IDisposable
         IReadOnlyList<SpottedText> spotted = [];
         if (region.Label == "spotting")
         {
-            (content, spotted) = Spotting.Parse(content, crop.Width, crop.Height);
+            (content, spotted) = Spotting.Parse(content, request.CropWidth, request.CropHeight);
         }
 
         return new ParsedBlock(region.Label, region, content, region.ReadingOrder)
         {
             SpottedText = spotted,
-            Image = picture,
-            ImagePath = picturePath,
+            Image = request.Picture,
+            ImagePath = request.PicturePath,
         };
+    }
+
+    /// <summary>One block between its crop and its text.</summary>
+    private sealed class BlockRequest(LayoutBox region, int cropWidth, int cropHeight) : IDisposable
+    {
+        public LayoutBox Region { get; } = region;
+
+        public int CropWidth { get; } = cropWidth;
+
+        public int CropHeight { get; } = cropHeight;
+
+        public byte[]? Picture { get; init; }
+
+        public string? PicturePath { get; init; }
+
+        public RgbImage? Prepared { get; init; }
+
+        public string Instruction { get; init; } = string.Empty;
+
+        public GenerationOptions Generation { get; init; } = GenerationOptions.Default;
+
+        public bool NeedsModel { get; init; }
+
+        public void Dispose() => Prepared?.Dispose();
     }
 
     /// <summary>

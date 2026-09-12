@@ -131,10 +131,49 @@ public sealed record DocumentParserOptions
     /// </remarks>
     public ParallelOptions? Parallelism { get; init; }
 
-    /// <summary>Number of blocks recognised concurrently.</summary>
+    /// <summary>Number of blocks whose vision towers run concurrently.</summary>
     /// <remarks>
-    /// The model's own kernels already use every core, so blocks are recognised one at a time by
-    /// default; raising this only helps when many blocks are small enough to leave cores idle.
+    /// The model's own kernels already use every core, so blocks are encoded one at a time by
+    /// default; raising this only helps when many blocks are small enough to leave cores idle,
+    /// and it costs holding several blocks' activations at once. When the blocks are decoded as a
+    /// batch this applies to the vision tower alone — the token loop is already shared — and the
+    /// kernels inside a block are narrowed to match, so the two settings do not multiply into more
+    /// threads than cores.
     /// </remarks>
     public int BlockConcurrency { get; init; } = 1;
+
+    /// <summary>Number of blocks whose token loops run as one batch.</summary>
+    /// <remarks>
+    /// <para>
+    /// A decode step reads all 255M decoder parameters and the 106M-parameter output head to
+    /// produce a single token — 646 MB of bfloat16 — so it is bound by how fast the weights arrive
+    /// and not by the arithmetic. Blocks on a page are independent, so stepping several together
+    /// reads those weights once for the whole batch. A page of forty small blocks is where that
+    /// matters: its decode costs as many weight sweeps as the longest block in each batch needs,
+    /// rather than as many as every block put together needs.
+    /// </para>
+    /// <para>
+    /// The vision tower and the prefill still run per block, because both already reach the matrix
+    /// products with hundreds of rows and have nothing to amortise. The cost of a batch is holding
+    /// its key/value caches at once — tens of megabytes per block — which is why it is sized.
+    /// </para>
+    /// <para>
+    /// Zero, the default, batches as many blocks as <see cref="DecodeBatchBytes"/> allows. A
+    /// positive value caps the count as well. Set to 1 to decode a block at a time, which is what
+    /// the port did before and what <see cref="BlockConcurrency"/> applies to.
+    /// </para>
+    /// </remarks>
+    public int DecodeBatch { get; init; }
+
+    /// <summary>
+    /// Key/value cache a decode batch may hold at once, in bytes.
+    /// </summary>
+    /// <remarks>
+    /// What bounds a batch is memory, not a count: every member holds its own cache for as long as
+    /// the batch runs, and a block's cache is proportional to its prompt — tens of megabytes for a
+    /// full-budget block and a few for a one-line heading. Sizing the batch by the cache it will
+    /// need lets a page of forty short blocks decode in one pass while a page of large ones still
+    /// splits, without either being told a block count that only suits the other.
+    /// </remarks>
+    public long DecodeBatchBytes { get; init; } = 768L * 1024 * 1024;
 }
