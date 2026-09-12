@@ -115,6 +115,50 @@ internal static class AttentionKernels
         int token = first;
         int end = first + count;
 
+        if (Simd.Use512)
+        {
+            int wide = Vector512<float>.Count;
+            for (; token <= end - (2 * wide); token += 2 * wide)
+            {
+                Vector512<float> z0 = Vector512<float>.Zero, y0 = Vector512<float>.Zero;
+                Vector512<float> z1 = Vector512<float>.Zero, y1 = Vector512<float>.Zero;
+                Vector512<float> z2 = Vector512<float>.Zero, y2 = Vector512<float>.Zero;
+                Vector512<float> z3 = Vector512<float>.Zero, y3 = Vector512<float>.Zero;
+
+                for (int d = 0; d < headDim; d++)
+                {
+                    int column = (d * tokens) + token;
+                    Vector512<float> kLo = Vector512.LoadUnsafe(ref k, (nuint)column);
+                    Vector512<float> kHi = Vector512.LoadUnsafe(ref k, (nuint)(column + wide));
+
+                    Vector512<float> v = Vector512.Create(Unsafe.Add(ref q, q0 + d));
+                    z0 = Vector512.FusedMultiplyAdd(v, kLo, z0);
+                    y0 = Vector512.FusedMultiplyAdd(v, kHi, y0);
+
+                    v = Vector512.Create(Unsafe.Add(ref q, q0 + headDim + d));
+                    z1 = Vector512.FusedMultiplyAdd(v, kLo, z1);
+                    y1 = Vector512.FusedMultiplyAdd(v, kHi, y1);
+
+                    v = Vector512.Create(Unsafe.Add(ref q, q0 + (2 * headDim) + d));
+                    z2 = Vector512.FusedMultiplyAdd(v, kLo, z2);
+                    y2 = Vector512.FusedMultiplyAdd(v, kHi, y2);
+
+                    v = Vector512.Create(Unsafe.Add(ref q, q0 + (3 * headDim) + d));
+                    z3 = Vector512.FusedMultiplyAdd(v, kLo, z3);
+                    y3 = Vector512.FusedMultiplyAdd(v, kHi, y3);
+                }
+
+                z0.StoreUnsafe(ref s, (nuint)(s0 + token));
+                y0.StoreUnsafe(ref s, (nuint)(s0 + token + wide));
+                z1.StoreUnsafe(ref s, (nuint)(s0 + tokens + token));
+                y1.StoreUnsafe(ref s, (nuint)(s0 + tokens + token + wide));
+                z2.StoreUnsafe(ref s, (nuint)(s0 + (2 * tokens) + token));
+                y2.StoreUnsafe(ref s, (nuint)(s0 + (2 * tokens) + token + wide));
+                z3.StoreUnsafe(ref s, (nuint)(s0 + (3 * tokens) + token));
+                y3.StoreUnsafe(ref s, (nuint)(s0 + (3 * tokens) + token + wide));
+            }
+        }
+
         if (Simd.Use256)
         {
             for (; token <= end - (2 * width); token += 2 * width)
@@ -197,6 +241,34 @@ internal static class AttentionKernels
         int width = Vector256<float>.Count;
         int token = first;
         int end = first + count;
+
+        if (Simd.Use512)
+        {
+            int wide = Vector512<float>.Count;
+            for (; token <= end - (4 * wide); token += 4 * wide)
+            {
+                Vector512<float> z0 = Vector512<float>.Zero, z1 = Vector512<float>.Zero;
+                Vector512<float> z2 = Vector512<float>.Zero, z3 = Vector512<float>.Zero;
+
+                for (int d = 0; d < headDim; d++)
+                {
+                    int column = (d * tokens) + token;
+                    Vector512<float> v = Vector512.Create(Unsafe.Add(ref q, q0 + d));
+                    z0 = Vector512.FusedMultiplyAdd(v, Vector512.LoadUnsafe(ref k, (nuint)column), z0);
+                    z1 = Vector512.FusedMultiplyAdd(
+                        v, Vector512.LoadUnsafe(ref k, (nuint)(column + wide)), z1);
+                    z2 = Vector512.FusedMultiplyAdd(
+                        v, Vector512.LoadUnsafe(ref k, (nuint)(column + (2 * wide))), z2);
+                    z3 = Vector512.FusedMultiplyAdd(
+                        v, Vector512.LoadUnsafe(ref k, (nuint)(column + (3 * wide))), z3);
+                }
+
+                z0.StoreUnsafe(ref s, (nuint)(s0 + token));
+                z1.StoreUnsafe(ref s, (nuint)(s0 + token + wide));
+                z2.StoreUnsafe(ref s, (nuint)(s0 + token + (2 * wide)));
+                z3.StoreUnsafe(ref s, (nuint)(s0 + token + (3 * wide)));
+            }
+        }
 
         if (Simd.Use256)
         {
@@ -336,6 +408,15 @@ internal static class AttentionKernels
             for (; row <= rows - ValueRows; row += ValueRows)
             {
                 int column = 0;
+                if (Simd.Use512)
+                {
+                    int wide = Vector512<float>.Count;
+                    for (; column <= headDim - (2 * wide); column += 2 * wide)
+                    {
+                        ValueTileWide512(ref w, ref v, ref y, row, column, chunk, steps, tokens, headDim, wide);
+                    }
+                }
+
                 for (; column <= headDim - (2 * width); column += 2 * width)
                 {
                     ValueTileWide(ref w, ref v, ref y, row, column, chunk, steps, tokens, headDim, width);
@@ -413,6 +494,65 @@ internal static class AttentionKernels
         Accumulate(ref y, ((row + 3) * headDim) + column, a3, b3, width);
     }
 
+    /// <summary>
+    /// Four output rows by two 512-bit column vectors, accumulated in eight <c>zmm</c> registers.
+    /// </summary>
+    /// <remarks>
+    /// Widening the lanes does not reorder anything: the lanes are output columns and the
+    /// reduction still steps over the chunk's tokens one at a time, so every output element
+    /// accumulates its terms in exactly the order the 256-bit tile accumulates them. The two
+    /// kernels are bit-identical, which is what lets the wide one be chosen on vector width alone.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ValueTileWide512(
+        ref float w,
+        ref float v,
+        ref float y,
+        int row,
+        int column,
+        int chunk,
+        int steps,
+        int tokens,
+        int headDim,
+        int width)
+    {
+        Vector512<float> a0 = Vector512<float>.Zero, b0 = Vector512<float>.Zero;
+        Vector512<float> a1 = Vector512<float>.Zero, b1 = Vector512<float>.Zero;
+        Vector512<float> a2 = Vector512<float>.Zero, b2 = Vector512<float>.Zero;
+        Vector512<float> a3 = Vector512<float>.Zero, b3 = Vector512<float>.Zero;
+
+        int w0 = (row * tokens) + chunk;
+        int vBase = (chunk * headDim) + column;
+
+        for (int step = 0; step < steps; step++)
+        {
+            int offset = vBase + (step * headDim);
+            Vector512<float> lo = Vector512.LoadUnsafe(ref v, (nuint)offset);
+            Vector512<float> hi = Vector512.LoadUnsafe(ref v, (nuint)(offset + width));
+
+            Vector512<float> s = Vector512.Create(Unsafe.Add(ref w, w0 + step));
+            a0 = Vector512.FusedMultiplyAdd(s, lo, a0);
+            b0 = Vector512.FusedMultiplyAdd(s, hi, b0);
+
+            s = Vector512.Create(Unsafe.Add(ref w, w0 + tokens + step));
+            a1 = Vector512.FusedMultiplyAdd(s, lo, a1);
+            b1 = Vector512.FusedMultiplyAdd(s, hi, b1);
+
+            s = Vector512.Create(Unsafe.Add(ref w, w0 + (2 * tokens) + step));
+            a2 = Vector512.FusedMultiplyAdd(s, lo, a2);
+            b2 = Vector512.FusedMultiplyAdd(s, hi, b2);
+
+            s = Vector512.Create(Unsafe.Add(ref w, w0 + (3 * tokens) + step));
+            a3 = Vector512.FusedMultiplyAdd(s, lo, a3);
+            b3 = Vector512.FusedMultiplyAdd(s, hi, b3);
+        }
+
+        Accumulate512(ref y, (row * headDim) + column, a0, b0, width);
+        Accumulate512(ref y, ((row + 1) * headDim) + column, a1, b1, width);
+        Accumulate512(ref y, ((row + 2) * headDim) + column, a2, b2, width);
+        Accumulate512(ref y, ((row + 3) * headDim) + column, a3, b3, width);
+    }
+
     /// <summary>Four output rows by one column vector, for the columns a wide tile does not cover.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ValueTileNarrow(
@@ -485,6 +625,13 @@ internal static class AttentionKernels
     {
         (Vector256.LoadUnsafe(ref y, (nuint)offset) + lo).StoreUnsafe(ref y, (nuint)offset);
         (Vector256.LoadUnsafe(ref y, (nuint)(offset + width)) + hi).StoreUnsafe(ref y, (nuint)(offset + width));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Accumulate512(ref float y, int offset, Vector512<float> lo, Vector512<float> hi, int width)
+    {
+        (Vector512.LoadUnsafe(ref y, (nuint)offset) + lo).StoreUnsafe(ref y, (nuint)offset);
+        (Vector512.LoadUnsafe(ref y, (nuint)(offset + width)) + hi).StoreUnsafe(ref y, (nuint)(offset + width));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

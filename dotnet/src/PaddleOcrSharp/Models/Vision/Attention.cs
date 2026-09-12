@@ -84,9 +84,7 @@ public static class Attention
                 Span<float> rowsSpan = block.Span;
                 for (int row = 0; row < rows; row++)
                 {
-                    Span<float> scoreRow = rowsSpan.Slice(row * tokens, tokens);
-                    Kernels.Scale(scoreRow, scale);
-                    Kernels.Softmax(scoreRow);
+                    Kernels.ScaledSoftmax(rowsSpan.Slice(row * tokens, tokens), scale);
                 }
 
                 soft += Stopwatch.GetTimestamp() - mark;

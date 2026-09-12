@@ -37,7 +37,13 @@ public static class BenchCommand
             GemmBenchmark.Run(machine);
         }
 
-        using RgbImage source = Synthetic(width, height);
+        // A synthetic page is fine for the tower, which does the same work whatever the pixels
+        // are, but not for the decoder: noise makes the model emit the stop token at once, so the
+        // decode loop never runs. `--image` feeds a real crop instead.
+        string? imagePath = command.Get("image");
+        using RgbImage source = imagePath is null
+            ? Synthetic(width, height)
+            : ImageIO.Load(imagePath);
 
         if (benchmarkVL)
         {
@@ -100,19 +106,29 @@ public static class BenchCommand
 
         for (int i = 0; i < iterations; i++)
         {
+            var stages = i == iterations - 1 ? new StageProfile() : null;
             long before = GC.GetTotalAllocatedBytes(precise: true);
             clock.Restart();
             List<int> generated = model.Generate(
                 prompt,
                 imageEmbeddings,
                 preprocessed.Grid,
-                GenerationOptions.Default with { MaxNewTokens = tokens });
+                GenerationOptions.Default with { MaxNewTokens = tokens },
+                out _,
+                stages);
             TimeSpan elapsed = clock.Elapsed;
             long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 
             Console.WriteLine(
                 $"Decode  [{i}]: {elapsed.TotalMilliseconds:F0}ms for prefill({prompt.Length}) + " +
                 $"{generated.Count} tokens ({allocated / (1024.0 * 1024.0):F1} MiB allocated)");
+
+            if (stages is not null)
+            {
+                Console.WriteLine();
+                Console.WriteLine(stages);
+                Console.WriteLine();
+            }
         }
 
     }

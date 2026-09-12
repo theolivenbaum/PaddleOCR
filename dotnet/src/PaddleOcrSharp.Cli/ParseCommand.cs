@@ -87,6 +87,9 @@ public static class ParseCommand
                 Nms = command.GetBool("layout-nms", LayoutOptions.Default.Nms),
             },
             BlockConcurrency = command.GetInt("block-concurrency", 1),
+            DecodeBatch = command.GetInt("decode-batch", DocumentParserOptions.Default.DecodeBatch),
+            DecodeBatchBytes = command.GetInt(
+                "decode-batch-bytes", (int)Math.Min(int.MaxValue, DocumentParserOptions.Default.DecodeBatchBytes)),
             Parallelism = ParallelismFrom(command),
             Profile = command.GetBool("profile", false) ? new RecognitionProfile() : null,
             StageProfile = command.GetBool("profile", false) ? new PageProfile() : null,
@@ -123,13 +126,14 @@ public static class ParseCommand
 
         var pages = new List<ParsedPage>();
         int dpi = command.GetInt("dpi", PdfRasterizer.DefaultDpi);
+        int maxPagePixels = command.GetInt("max-page-pixels", PdfRasterizer.DefaultMaxPagePixels);
         int maxPages = command.GetInt("max-pages", 0);
         int pageIndex = 0;
 
         foreach (string path in command.Positional)
         {
             foreach ((RgbImage image, string label) in LoadPages(
-                path, dpi, maxPages, command.Get("password"), stages))
+                path, dpi, maxPages, maxPagePixels, command.Get("password"), stages))
             {
                 using (image)
                 {
@@ -209,6 +213,7 @@ public static class ParseCommand
         string path,
         int dpi,
         int maxPages,
+        int maxPagePixels,
         string? password,
         PageProfile? stages)
     {
@@ -230,7 +235,7 @@ public static class ParseCommand
         // Measuring the MoveNext rather than the whole loop is what keeps the render out of the
         // recognition it is interleaved with.
         int index = 0;
-        using IEnumerator<RgbImage> rendered = PdfRasterizer.Render(path, dpi, password, maxPages)
+        using IEnumerator<RgbImage> rendered = PdfRasterizer.Render(path, dpi, password, maxPages, maxPagePixels)
             .GetEnumerator();
 
         while (true)

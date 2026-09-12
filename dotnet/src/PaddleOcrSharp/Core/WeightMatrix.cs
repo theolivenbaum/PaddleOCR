@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PaddleOcrSharp.Core;
 
@@ -119,6 +120,7 @@ public readonly struct WeightMatrix
             raw.Slice(start + Cols, Cols),
             raw.Slice(start + (2 * Cols), Cols),
             raw.Slice(start + (3 * Cols), Cols),
+            row + 8 <= Rows ? 4 * Cols : 0,
             out a0,
             out a1,
             out a2,
@@ -215,6 +217,32 @@ public readonly struct WeightMatrix
         return sum;
     }
 
+    /// <summary>Issues a prefetch for the line holding <c>row[offset]</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// The single-row kernel below is what a decode step runs: it reads every weight exactly once
+    /// and does one multiply-add with each, so nothing it touches is ever reused and the loop is
+    /// bound by how fast the lines arrive. A token costs 646 MB of weights and they arrive as a
+    /// hundred and forty short bursts, one per projection per layer.
+    /// </para>
+    /// <para>
+    /// What has to be prefetched is the <i>next group of rows</i>, not further along the current
+    /// ones: a row of this model is two to six kilobytes, which the loop crosses in well under the
+    /// memory latency, so an offset that stays inside the row arrives too late to be worth
+    /// anything. Prefetching at <c>i + 4·Cols</c> from each of the four rows in flight covers the
+    /// four rows the next call will read, one line per row per two steps, which is exactly the
+    /// rate the loop consumes them at.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void Prefetch(ref ushort row, int offset)
+    {
+        if (Sse.IsSupported)
+        {
+            Sse.Prefetch0(Unsafe.AsPointer(ref Unsafe.Add(ref row, offset)));
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void DotBF16x4(
         ReadOnlySpan<float> x,
@@ -222,6 +250,7 @@ public readonly struct WeightMatrix
         ReadOnlySpan<ushort> w1,
         ReadOnlySpan<ushort> w2,
         ReadOnlySpan<ushort> w3,
+        int lookahead,
         out float a0,
         out float a1,
         out float a2,
@@ -238,8 +267,23 @@ public readonly struct WeightMatrix
             Vector256<float> v2 = Vector256<float>.Zero;
             Vector256<float> v3 = Vector256<float>.Zero;
 
+            ref ushort p0 = ref MemoryMarshal.GetReference(w0);
+            ref ushort p1 = ref MemoryMarshal.GetReference(w1);
+            ref ushort p2 = ref MemoryMarshal.GetReference(w2);
+            ref ushort p3 = ref MemoryMarshal.GetReference(w3);
+
             for (; i <= length - 16; i += 16)
             {
+                // One line per row every other step: the step consumes 32 bytes of each row, so
+                // issuing on every one would ask for the same line twice.
+                if (lookahead != 0 && (i & 31) == 0)
+                {
+                    Prefetch(ref p0, i + lookahead);
+                    Prefetch(ref p1, i + lookahead);
+                    Prefetch(ref p2, i + lookahead);
+                    Prefetch(ref p3, i + lookahead);
+                }
+
                 Vector256<float> xLo = Vector256.LoadUnsafe(in x[i]);
                 Vector256<float> xHi = Vector256.LoadUnsafe(in x[i + 8]);
 

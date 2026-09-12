@@ -182,7 +182,7 @@ public sealed class VisionTower
 
             using (profile?.Measure("rope+split"))
             {
-                SplitHeadsWithRope(packed.Span, queries.Span, tokens, heads, headDim, cos.Span, sin.Span);
+                SplitHeadsWithRope(packed.Memory, queries.Memory, tokens, heads, headDim, cos.Memory, sin.Memory);
             }
 
             using (profile?.Measure("qkv gemm"))
@@ -192,7 +192,7 @@ public sealed class VisionTower
 
             using (profile?.Measure("rope+split"))
             {
-                SplitHeadsWithRope(packed.Span, keys.Span, tokens, heads, headDim, cos.Span, sin.Span);
+                SplitHeadsWithRope(packed.Memory, keys.Memory, tokens, heads, headDim, cos.Memory, sin.Memory);
             }
 
             using (profile?.Measure("qkv gemm"))
@@ -202,7 +202,7 @@ public sealed class VisionTower
 
             using (profile?.Measure("rope+split"))
             {
-                SplitHeads(packed.Span, values.Span, tokens, heads, headDim);
+                SplitHeads(packed.Memory, values.Memory, tokens, heads, headDim);
             }
 
             using (profile?.Measure("attention"))
@@ -216,7 +216,7 @@ public sealed class VisionTower
 
             using (profile?.Measure("rope+split"))
             {
-                MergeHeads(attention.Span, packed.Span, tokens, heads, headDim);
+                MergeHeads(attention.Memory, packed.Memory, tokens, heads, headDim);
             }
 
             using (profile?.Measure("out gemm"))
@@ -243,7 +243,7 @@ public sealed class VisionTower
 
             using (profile?.Measure("gelu"))
             {
-                Kernels.GeluTanh(intermediate.Span);
+                Kernels.GeluTanhParallel(intermediate.Memory);
             }
 
             using (profile?.Measure("mlp gemm"))
@@ -344,64 +344,88 @@ public sealed class VisionTower
         return result;
     }
 
+    /// <summary>
+    /// Re-lays one projection from <c>[token, head, d]</c> to <c>[head, token, d]</c>, applying
+    /// the 2-D rotary embedding to each head's row on the way.
+    /// </summary>
+    /// <remarks>
+    /// The three shuffles below move <c>patches x 1152</c> floats each — 24 MB a layer at a
+    /// full-budget block, four times over — and each head's slice is independent of every other's,
+    /// so they are split across the same worker count as the matrix products beside them. They
+    /// ran on one core while the GEMMs used four.
+    /// </remarks>
     private void SplitHeadsWithRope(
-        ReadOnlySpan<float> packed,
-        Span<float> destination,
+        ReadOnlyMemory<float> packed,
+        Memory<float> destination,
         int tokens,
         int heads,
         int headDim,
-        ReadOnlySpan<float> cos,
-        ReadOnlySpan<float> sin)
+        ReadOnlyMemory<float> cos,
+        ReadOnlyMemory<float> sin)
     {
         int width = heads * headDim;
-        for (int head = 0; head < heads; head++)
+        Parallel.For(0, heads, Parallelism.Options, head =>
         {
             int headBase = head * tokens * headDim;
+            ReadOnlySpan<float> source = packed.Span;
+            Span<float> target = destination.Span;
+            ReadOnlySpan<float> cosines = cos.Span;
+            ReadOnlySpan<float> sines = sin.Span;
+
             for (int token = 0; token < tokens; token++)
             {
-                Span<float> target = destination.Slice(headBase + (token * headDim), headDim);
-                packed.Slice((token * width) + (head * headDim), headDim).CopyTo(target);
-                _rope.Apply(target, cos.Slice(token * headDim, headDim), sin.Slice(token * headDim, headDim));
+                Span<float> row = target.Slice(headBase + (token * headDim), headDim);
+                source.Slice((token * width) + (head * headDim), headDim).CopyTo(row);
+                _rope.Apply(
+                    row, cosines.Slice(token * headDim, headDim), sines.Slice(token * headDim, headDim));
             }
-        }
+        });
     }
 
+    /// <summary>Re-lays one projection from <c>[token, head, d]</c> to <c>[head, token, d]</c>.</summary>
     private static void SplitHeads(
-        ReadOnlySpan<float> packed,
-        Span<float> destination,
+        ReadOnlyMemory<float> packed,
+        Memory<float> destination,
         int tokens,
         int heads,
         int headDim)
     {
         int width = heads * headDim;
-        for (int head = 0; head < heads; head++)
+        Parallel.For(0, heads, Parallelism.Options, head =>
         {
             int headBase = head * tokens * headDim;
+            ReadOnlySpan<float> source = packed.Span;
+            Span<float> target = destination.Span;
+
             for (int token = 0; token < tokens; token++)
             {
-                packed.Slice((token * width) + (head * headDim), headDim)
-                    .CopyTo(destination.Slice(headBase + (token * headDim), headDim));
+                source.Slice((token * width) + (head * headDim), headDim)
+                    .CopyTo(target.Slice(headBase + (token * headDim), headDim));
             }
-        }
+        });
     }
 
+    /// <summary>The inverse of <see cref="SplitHeads"/>, back to <c>[token, head, d]</c>.</summary>
     private static void MergeHeads(
-        ReadOnlySpan<float> perHead,
-        Span<float> destination,
+        ReadOnlyMemory<float> perHead,
+        Memory<float> destination,
         int tokens,
         int heads,
         int headDim)
     {
         int width = heads * headDim;
-        for (int head = 0; head < heads; head++)
+        Parallel.For(0, heads, Parallelism.Options, head =>
         {
             int headBase = head * tokens * headDim;
+            ReadOnlySpan<float> source = perHead.Span;
+            Span<float> target = destination.Span;
+
             for (int token = 0; token < tokens; token++)
             {
-                perHead.Slice(headBase + (token * headDim), headDim)
-                    .CopyTo(destination.Slice((token * width) + (head * headDim), headDim));
+                source.Slice(headBase + (token * headDim), headDim)
+                    .CopyTo(target.Slice((token * width) + (head * headDim), headDim));
             }
-        }
+        });
     }
 
     private sealed class LayerWeights

@@ -32,12 +32,27 @@ public static class Help
               --doc-unwarping         Flatten curled pages before parsing
               --prompt-label <name>   Whole-page mode label when --no-layout (e.g. spotting)
               --dpi <n>               PDF rendering resolution (default: 144, as upstream)
+              --max-page-pixels <n>   Largest page raster to render (default: 12000000, above ISO
+                                      A2 at 144 dpi). A dpi is per inch of the page the PDF claims
+                                      to be, and a scan's MediaBox is not always its real size; a
+                                      page over the budget is rendered at the resolution that fits.
+                                      0 renders at --dpi whatever the page claims.
               --max-pages <n>         Stop after this many PDF pages
               --password <text>       Password for an encrypted PDF
               --output-dir <path>     Write <name>.md, <name>.json and imgs/ per page
               --format markdown|json  Output format when writing to stdout
               --page-separator <text> Text between pages (default: a blank line)
-              --block-concurrency <n> Blocks recognised in parallel (default: 1)
+              --block-concurrency <n> Blocks encoded in parallel (default: 1). The tower's kernels
+                                      already use every core, so this only helps where blocks are
+                                      small enough to leave cores idle; the kernels are narrowed to
+                                      match, so the two settings do not multiply.
+              --decode-batch <n>      Cap on the blocks whose token loops run as one batch
+                                      (default: 0, i.e. as many as the cache budget allows). A
+                                      decode step reads 646 MB of weights for one token, so a batch
+                                      reads them once for all its blocks. 1 decodes a block at a
+                                      time, as the port did before.
+              --decode-batch-bytes <n>
+                                      Key/value cache one batch may hold (default: 805306368)
               --max-parallelism <n>   Threads the kernels spread work across (default: one per
                                       core). Independent of --block-concurrency, which decides how
                                       many blocks run at once; the two multiply. -1 removes the cap,
@@ -70,6 +85,9 @@ public static class Help
 
             bench options:
               --width <n> --height <n>   Synthetic page size (default: 1024x1024)
+              --image <path>             Use a real image instead of a synthetic page. The tower
+                                         does not care, but the decoder does: on noise the model
+                                         stops at once and the decode loop never runs.
               --iterations <n>           Repeats per stage (default: 3)
               --tokens <n>               Tokens to decode per iteration (default: 32)
               --no-vl                    Skip the vision tower and decoder

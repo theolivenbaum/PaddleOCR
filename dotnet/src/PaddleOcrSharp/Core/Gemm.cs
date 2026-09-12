@@ -109,8 +109,18 @@ public static class Gemm
         });
 
     /// <summary>
-    /// Chooses a column-panel width whose slice of the weight matrix stays inside L2.
+    /// Chooses a column-panel width whose slice of the weight matrix stays inside L2, and whose
+    /// panel count divides evenly across the workers.
     /// </summary>
+    /// <remarks>
+    /// The even division is not a detail. At the tower's own shape — 1152 columns over a 1152-long
+    /// reduction — the L2 target alone gives a 116-column panel and so ten panels, which two of
+    /// four workers finish a third earlier than the other two. That is the whole gap between the
+    /// qkv and output projections at 190 GFLOP/s and the MLP products at 244 on the same machine:
+    /// the MLP's 4304 columns happen to divide into thirty-eight panels, close enough to a
+    /// multiple of four that the tail costs nothing. Rounding the count up rather than the width
+    /// down keeps every panel inside L2 and gives each worker the same number of them.
+    /// </remarks>
     private static int ChoosePanelWidth(int inner, int cols, DType dtype)
     {
         const int TargetPanelBytes = 256 * 1024;
@@ -119,11 +129,30 @@ public static class Gemm
         int panel = Math.Max(ColBlock, TargetPanelBytes / rowBytes);
         panel = (panel + ColBlock - 1) / ColBlock * ColBlock;
 
-        // Never leave threads idle: cap the panel so there is at least one per processor.
-        int maximum = Math.Max(ColBlock, (cols + Environment.ProcessorCount - 1) / Environment.ProcessorCount);
-        maximum = (maximum + ColBlock - 1) / ColBlock * ColBlock;
+        int workers = Parallelism.Options.MaxDegreeOfParallelism;
+        if (workers <= 0)
+        {
+            workers = Environment.ProcessorCount;
+        }
 
-        return Math.Min(panel, Math.Max(ColBlock, maximum));
+        // Never leave threads idle: cap the panel so there is at least one per worker.
+        int maximum = Math.Max(ColBlock, (cols + workers - 1) / workers);
+        maximum = (maximum + ColBlock - 1) / ColBlock * ColBlock;
+        panel = Math.Min(panel, Math.Max(ColBlock, maximum));
+
+        // Then narrow it until the panels divide evenly, so no worker carries an extra one.
+        int panels = Math.Max(1, (cols + panel - 1) / panel);
+        if (panels % workers != 0)
+        {
+            int balanced = ((panels / workers) + 1) * workers;
+            int narrowed = (((cols + balanced - 1) / balanced) + ColBlock - 1) / ColBlock * ColBlock;
+            if (narrowed >= ColBlock && narrowed < panel)
+            {
+                panel = narrowed;
+            }
+        }
+
+        return panel;
     }
 
     /// <summary>
