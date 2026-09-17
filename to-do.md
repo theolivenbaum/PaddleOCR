@@ -272,6 +272,45 @@ orientation classifier.*
 - [ ] A direct convolution kernel for the backbone's small stride-1 shapes, where the im2col
       column buffer plausibly costs more than the multiply-adds it feeds. **Unmeasured.**
 
+## Ternary weight quantization
+
+Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigated in the
+`PrismML-Eng/llama.cpp` fork and the Bonsai whitepapers; scope is the VL model only.
+
+- [x] `Formats/Gguf`: GGUF v3 reader and streaming writer, the fork's type ids (`PQ2_0` 142,
+      `PTQ1_0` 143), block geometry and row sizes.
+- [x] `TernaryBlocks`: both codecs, **byte-identical** to `quantize_row_*_ref` and
+      `dequantize_row_*` in the fork — checked against the compiled C and against an independent
+      Python transcription (`tools/reference/dump_ternary_blocks.py`), which agree on every byte.
+- [x] `TernaryKernels`: the vectorised decoders, asserted equal to the scalar reference rather than
+      close to it. Both layouts decode into contiguous runs, which is what makes that possible —
+      for `PTQ1_0` a fixed digit index over `c` consecutive bytes is the `c` consecutive weights at
+      `n·c`, which is not obvious from the encoder's scatter.
+- [x] `HadamardRotation`: the normalized Sylvester–Walsh transform and the ±1 diagonal, sign first
+      then rotation as the fork does it; fold and apply are one implementation so they cannot drift.
+- [x] `WeightMatrix` gains quantized storage and `Gemm` applies a weight's rotation to the
+      activation, so the tower, the decoder and the pipeline are unchanged.
+- [x] `TernaryQuantizer`: per-group scale search, GPTQ error feedback with a Cholesky of the damped
+      Hessian, per-tensor error report.
+- [x] `ActivationRecorder`: `H = Σ xᵀx` per weight while the bf16 model runs, as an `AsyncLocal`
+      scope, split into passes that fit a memory budget.
+- [x] `QuantizationPolicy`: per-tensor precision as JSON globs, with the four tensors that should
+      not be quantized at all spelled out and why.
+- [x] `tools/PaddleOcrSharp.Quantize`: `convert`, `validate`, `inspect`, `policy`.
+- [x] Tests: golden vectors, container round-trips, rotation against the explicit matrix, the
+      quantized kernels against their dequantized reference, GPTQ against round-to-nearest.
+- [ ] **Convert a real checkpoint and measure it.** Everything above is exercised on synthetic
+      tensors; nothing here has seen the 0.9B weights. The four levels in `docs/ternary.md` are
+      what decides whether ternary is shippable at this model size, and the honest expectation is
+      that some tensors will have to move up a band.
+- [ ] Profile the decode step against the bf16 build. The traffic falls from 721 MB a token to 79,
+      but the unpack is then the candidate bound, and a fused decode-and-multiply kernel is the
+      answer if it is.
+- [ ] The vision MLP's 4304-wide projection cannot be packed at group 128 — 134 M parameters that
+      stay bfloat16. A narrower group or a transposed layout is the only way to reach it.
+- [ ] Hoist the activation rotation: `q`/`k`/`v` each rotate the same normed activation, which the
+      fork memoizes. Worth doing when a profile asks for it.
+
 ## Closing the layout gap against upstream
 
 - [x] `conv2d` reached `Gemm.MatMul`'s `k x n` form, which accumulates output rows in memory at one

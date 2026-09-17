@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PaddleOcrSharp.Quantize</RootNamespace>
+    <AssemblyName>paddleocr-quantize</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- Converting a checkpoint is one long-running process that does the same shapes over and
+         over, which is the case tiered compilation is designed for. The CLI turns it off because
+         every run of that tool is cold; this one is not. -->
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/PaddleOcrSharp/PaddleOcrSharp.csproj" />
+    <ProjectReference Include="../../src/PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj" />
+  </ItemGroup>
+
+</Project>

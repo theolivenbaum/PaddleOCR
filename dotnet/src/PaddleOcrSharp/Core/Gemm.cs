@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PaddleOcrSharp.Quantization;
 
 namespace PaddleOcrSharp.Core;
 
@@ -70,6 +71,20 @@ public static class Gemm
             throw new ArgumentException("Bias buffer is too small.", nameof(bias));
         }
 
+        // Calibration: while a recorder is installed, every activation that reaches a named
+        // weight contributes to that weight's Hessian. Outside a calibration pass this is a null
+        // check against a matrix product.
+        if (ActivationRecorder.Current is { } recorder && weight.Name is { } name)
+        {
+            recorder.Record(name, x.Span[..(rows * inner)], rows, inner);
+        }
+
+        if (weight.Rotation is not null)
+        {
+            LinearRotated(x, rows, inner, weight, bias, y, cols);
+            return;
+        }
+
         if ((long)rows * cols * inner < ParallelThreshold || Environment.ProcessorCount <= 1)
         {
             RunPanel(x.Span, rows, inner, weight, bias.Span, y.Span, cols, 0, cols);
@@ -80,10 +95,55 @@ public static class Gemm
         // the same slice of the weight matrix for every activation row, so the panel stays in
         // cache. Splitting along rows would make every thread stream the whole weight matrix once
         // per row, which for a 1152x4304 projection is 10 MB of traffic per token.
-        int panel = ChoosePanelWidth(inner, cols, weight.Dtype);
+        int panel = ChoosePanelWidth(cols, weight);
         int panels = (cols + panel - 1) / panel;
 
         RunPanelsInParallel(panels, panel, x, rows, inner, weight, bias, y, cols);
+    }
+
+    /// <summary>
+    /// Transforms the activations into the basis the weights were folded into, then runs the
+    /// ordinary product.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A ternary checkpoint may store <c>W Rᵀ</c> rather than <c>W</c>, for a fixed orthogonal
+    /// <c>R</c> whose whole purpose is to flatten the outliers the quantizer would otherwise have
+    /// to spend its range on. The product the model wants is then <c>(W Rᵀ)(R x)</c>, so the
+    /// activation is rotated here and the kernels below see nothing unusual.
+    /// </para>
+    /// <para>
+    /// The transform is <c>O(inner · log blockSize)</c> per activation row against
+    /// <c>O(inner · cols)</c> for the product it precedes, so at this model's shapes it is well
+    /// under a percent. It is <i>repeated</i>, though: <c>q_proj</c>, <c>k_proj</c> and
+    /// <c>v_proj</c> each rotate the same normed activation. The fork memoizes exactly that, keyed
+    /// on the activation and the rotation; doing the same here means hoisting the transform into
+    /// the two model classes, which is worth doing when a profile asks for it and not before.
+    /// </para>
+    /// </remarks>
+    private static void LinearRotated(
+        ReadOnlyMemory<float> x,
+        int rows,
+        int inner,
+        WeightMatrix weight,
+        ReadOnlyMemory<float> bias,
+        Memory<float> y,
+        int cols)
+    {
+        int length = rows * inner;
+        using PooledBuffer rotated = TensorPool.Rent(length);
+        x.Span[..length].CopyTo(rotated.Span);
+        weight.Rotation!.Apply(rotated.Span, rows, inner);
+
+        if ((long)rows * cols * inner < ParallelThreshold || Environment.ProcessorCount <= 1)
+        {
+            RunPanel(rotated.Span, rows, inner, weight, bias.Span, y.Span, cols, 0, cols);
+            return;
+        }
+
+        int panel = ChoosePanelWidth(cols, weight);
+        int panels = (cols + panel - 1) / panel;
+        RunPanelsInParallel(panels, panel, rotated.Memory, rows, inner, weight, bias, y, cols);
     }
 
     /// <summary>
@@ -121,11 +181,13 @@ public static class Gemm
     /// multiple of four that the tail costs nothing. Rounding the count up rather than the width
     /// down keeps every panel inside L2 and gives each worker the same number of them.
     /// </remarks>
-    private static int ChoosePanelWidth(int inner, int cols, DType dtype)
+    private static int ChoosePanelWidth(int cols, WeightMatrix weight)
     {
         const int TargetPanelBytes = 256 * 1024;
 
-        int rowBytes = Math.Max(1, inner * dtype.ByteSize());
+        // A quantized row is a fraction of a byte per weight, so its own stride is what decides
+        // how many columns fit the target rather than the element size of a dtype it has not got.
+        int rowBytes = Math.Max(1, weight.RowByteLength);
         int panel = Math.Max(ColBlock, TargetPanelBytes / rowBytes);
         panel = (panel + ColBlock - 1) / ColBlock * ColBlock;
 

@@ -4,6 +4,9 @@
     <Project Path="src/PaddleOcrSharp.Pdf/PaddleOcrSharp.Pdf.csproj" />
     <Project Path="src/PaddleOcrSharp.Cli/PaddleOcrSharp.Cli.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/PaddleOcrSharp.Quantize/PaddleOcrSharp.Quantize.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PaddleOcrSharp.Tests/PaddleOcrSharp.Tests.csproj" />
   </Folder>

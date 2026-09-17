@@ -2,6 +2,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PaddleOcrSharp.Formats.Gguf;
+using PaddleOcrSharp.Quantization;
 
 namespace PaddleOcrSharp.Core;
 
@@ -10,23 +12,76 @@ namespace PaddleOcrSharp.Core;
 /// to float32 inside the inner loop.
 /// </summary>
 /// <remarks>
-/// Only the two dtypes the shipped checkpoints use are given fast paths: bfloat16 (PaddleOCR-VL)
-/// and float32 (PP-DocLayoutV3). Everything else must be converted at load time.
+/// <para>
+/// Three storage kinds have fast paths: bfloat16 (PaddleOCR-VL), float32 (PP-DocLayoutV3) and the
+/// ternary block layouts of a quantized checkpoint. Everything else must be converted at load time.
+/// </para>
+/// <para>
+/// A quantized matrix behaves like any other here: it answers the same four questions — one dot,
+/// four dots, one row widened, many rows widened — so every caller above this type, and the whole
+/// of <see cref="Gemm"/>, is unchanged by quantization. What differs is only where the win lands.
+/// <see cref="CopyRows"/> serves the panel kernel, which decodes a column panel once and reuses it
+/// across every activation row, so prefill gains footprint and not time; <see cref="Dot4"/> serves
+/// a decode step, which reads every weight exactly once and is bound by how fast the bytes arrive,
+/// so there the win is the whole point.
+/// </para>
 /// </remarks>
 public readonly struct WeightMatrix
 {
     private readonly ReadOnlyMemory<byte> _bytes;
+    private readonly int _rowBytes;
 
-    private WeightMatrix(ReadOnlyMemory<byte> bytes, DType dtype, int rows, int cols)
+    private WeightMatrix(
+        ReadOnlyMemory<byte> bytes,
+        DType dtype,
+        GgmlType quantization,
+        int rows,
+        int cols,
+        int rowBytes,
+        HadamardRotation? rotation,
+        string? name)
     {
         _bytes = bytes;
+        _rowBytes = rowBytes;
         Dtype = dtype;
+        Quantization = quantization;
         Rows = rows;
         Cols = cols;
+        Rotation = rotation;
+        Name = name;
     }
 
-    /// <summary>Storage dtype.</summary>
+    /// <summary>
+    /// The checkpoint name this matrix was loaded under, when it came from a store that knows it.
+    /// </summary>
+    /// <remarks>
+    /// It exists for one reason: <see cref="ActivationRecorder"/> accumulates a Hessian per
+    /// <i>input site</i> while the unquantized model runs over a calibration set, and the only
+    /// thing that names a site is the weight the activation is about to meet. Nothing on the
+    /// inference path reads it.
+    /// </remarks>
+    public string? Name { get; }
+
+    /// <summary>Storage dtype. Meaningful only when <see cref="IsQuantized"/> is false.</summary>
     public DType Dtype { get; }
+
+    /// <summary>
+    /// Block layout of a quantized matrix; <see cref="GgmlType.F32"/> when the matrix is not
+    /// quantized.
+    /// </summary>
+    public GgmlType Quantization { get; }
+
+    /// <summary>Whether the storage is packed ternary blocks rather than plain elements.</summary>
+    public bool IsQuantized => Quantization.IsQuantized();
+
+    /// <summary>
+    /// The basis the weights are stored in, when they were folded by a rotation the activation
+    /// must be transformed by before the product; <see langword="null"/> otherwise.
+    /// </summary>
+    public HadamardRotation? Rotation { get; }
+
+    /// <summary>Bytes one row of the matrix occupies.</summary>
+    public int RowByteLength => _rowBytes;
 
     /// <summary>Number of rows (the <c>out_features</c> of an <c>nn.Linear</c>).</summary>
     public int Rows { get; }
@@ -45,7 +100,7 @@ public readonly struct WeightMatrix
     /// <param name="values">Receives the matrix, row-major, on success.</param>
     public bool TryGetFloats(out ReadOnlySpan<float> values)
     {
-        if (Dtype != DType.Float32)
+        if (IsQuantized || Dtype != DType.Float32)
         {
             values = default;
             return false;
@@ -56,7 +111,13 @@ public readonly struct WeightMatrix
     }
 
     /// <summary>Wraps raw bytes as a weight matrix.</summary>
-    public static WeightMatrix Create(ReadOnlyMemory<byte> bytes, DType dtype, int rows, int cols)
+    /// <param name="bytes">Row-major storage.</param>
+    /// <param name="dtype">Storage dtype; float32 or bfloat16.</param>
+    /// <param name="rows">Output features.</param>
+    /// <param name="cols">Input features.</param>
+    /// <param name="name">Optional checkpoint name, for calibration.</param>
+    public static WeightMatrix Create(
+        ReadOnlyMemory<byte> bytes, DType dtype, int rows, int cols, string? name = null)
     {
         long expected = (long)rows * cols * dtype.ByteSize();
         if (bytes.Length < expected)
@@ -72,7 +133,41 @@ public readonly struct WeightMatrix
                 $"{dtype} weights must be converted to float32 or bfloat16 before use.");
         }
 
-        return new WeightMatrix(bytes, dtype, rows, cols);
+        return new WeightMatrix(bytes, dtype, GgmlType.F32, rows, cols, cols * dtype.ByteSize(), rotation: null, name);
+    }
+
+    /// <summary>Wraps packed ternary blocks as a weight matrix.</summary>
+    /// <param name="bytes">The packed rows, each <c>RowSize(cols)</c> bytes long.</param>
+    /// <param name="quantization">Block layout; must be a quantized ggml type.</param>
+    /// <param name="rows">Output features.</param>
+    /// <param name="cols">Input features; must be a multiple of the layout's group size.</param>
+    /// <param name="rotation">
+    /// The rotation the weights were folded by, or <see langword="null"/> when they were not.
+    /// </param>
+    /// <param name="name">Optional checkpoint name.</param>
+    public static WeightMatrix CreateQuantized(
+        ReadOnlyMemory<byte> bytes,
+        GgmlType quantization,
+        int rows,
+        int cols,
+        HadamardRotation? rotation = null,
+        string? name = null)
+    {
+        if (!quantization.IsQuantized())
+        {
+            throw new ArgumentException($"{quantization} is not a quantized layout.", nameof(quantization));
+        }
+
+        int rowBytes = checked((int)quantization.RowSize(cols));
+        long expected = (long)rows * rowBytes;
+        if (bytes.Length < expected)
+        {
+            throw new ArgumentException(
+                $"Need {expected} bytes for a [{rows}, {cols}] {quantization.TypeName()} matrix but only {bytes.Length} are available.",
+                nameof(bytes));
+        }
+
+        return new WeightMatrix(bytes, DType.UInt8, quantization, rows, cols, rowBytes, rotation, name);
     }
 
     /// <summary>Wraps a float32 array as a weight matrix.</summary>
@@ -83,6 +178,12 @@ public readonly struct WeightMatrix
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float Dot(ReadOnlySpan<float> x, int row)
     {
+        if (IsQuantized)
+        {
+            Span<float> decoded = stackalloc float[TernaryBlockGeometry.GroupSize];
+            return DotQuantized(x, row, decoded);
+        }
+
         if (Dtype == DType.Float32)
         {
             return Gemm.Dot(x, MemoryMarshal.Cast<byte, float>(_bytes.Span).Slice(row * Cols, Cols));
@@ -101,6 +202,16 @@ public readonly struct WeightMatrix
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Dot4(ReadOnlySpan<float> x, int row, out float a0, out float a1, out float a2, out float a3)
     {
+        if (IsQuantized)
+        {
+            Span<float> decoded = stackalloc float[TernaryBlockGeometry.GroupSize];
+            a0 = DotQuantized(x, row, decoded);
+            a1 = DotQuantized(x, row + 1, decoded);
+            a2 = DotQuantized(x, row + 2, decoded);
+            a3 = DotQuantized(x, row + 3, decoded);
+            return;
+        }
+
         if (Dtype == DType.Float32)
         {
             ReadOnlySpan<float> w = MemoryMarshal.Cast<byte, float>(_bytes.Span);
@@ -130,6 +241,13 @@ public readonly struct WeightMatrix
     /// <summary>Widens row <paramref name="row"/> into <paramref name="destination"/>.</summary>
     public void CopyRow(int row, Span<float> destination)
     {
+        if (IsQuantized)
+        {
+            TernaryKernels.DecodeRow(
+                Quantization, _bytes.Span.Slice(row * _rowBytes, _rowBytes), destination[..Cols]);
+            return;
+        }
+
         if (Dtype == DType.Float32)
         {
             MemoryMarshal.Cast<byte, float>(_bytes.Span).Slice(row * Cols, Cols).CopyTo(destination);
@@ -147,6 +265,15 @@ public readonly struct WeightMatrix
     /// </summary>
     public void CopyRows(int row, int count, Span<float> destination)
     {
+        if (IsQuantized)
+        {
+            TernaryKernels.DecodeRow(
+                Quantization,
+                _bytes.Span.Slice(row * _rowBytes, count * _rowBytes),
+                destination[..(count * Cols)]);
+            return;
+        }
+
         int start = row * Cols;
         int length = count * Cols;
 
@@ -164,6 +291,12 @@ public readonly struct WeightMatrix
     /// <summary>Widens the whole matrix into <paramref name="destination"/>, row-major.</summary>
     public void CopyTo(Span<float> destination)
     {
+        if (IsQuantized)
+        {
+            CopyRows(0, Rows, destination);
+            return;
+        }
+
         if (Dtype == DType.Float32)
         {
             MemoryMarshal.Cast<byte, float>(_bytes.Span)[..(Rows * Cols)].CopyTo(destination);
@@ -173,6 +306,33 @@ public readonly struct WeightMatrix
             FloatConversion.BF16ToFloat(
                 MemoryMarshal.Cast<byte, ushort>(_bytes.Span)[..(Rows * Cols)], destination);
         }
+    }
+
+    /// <summary>
+    /// Dot product of <paramref name="x"/> with a packed row, one block at a time.
+    /// </summary>
+    /// <param name="x">Activation row.</param>
+    /// <param name="row">Weight row index.</param>
+    /// <param name="scratch">A 128-float buffer, reused across blocks and rows.</param>
+    /// <remarks>
+    /// The block is decoded into <paramref name="scratch"/> and consumed immediately, so it never
+    /// leaves L1; what crosses the memory system is the packed bytes, which is the traffic a decode
+    /// step is bound by. At 1.75 bits a weight that is a ninth of what bfloat16 costs.
+    /// </remarks>
+    private float DotQuantized(ReadOnlySpan<float> x, int row, Span<float> scratch)
+    {
+        ReadOnlySpan<byte> packed = _bytes.Span.Slice(row * _rowBytes, _rowBytes);
+        int blockBytes = Quantization.TypeSize();
+        int blocks = Cols / TernaryBlockGeometry.GroupSize;
+
+        float sum = 0f;
+        for (int b = 0; b < blocks; b++)
+        {
+            TernaryKernels.DecodeRow(Quantization, packed.Slice(b * blockBytes, blockBytes), scratch);
+            sum += Gemm.Dot(x.Slice(b * TernaryBlockGeometry.GroupSize, TernaryBlockGeometry.GroupSize), scratch);
+        }
+
+        return sum;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

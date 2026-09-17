@@ -44,15 +44,39 @@ public sealed class PaddleOcrVLModel : IDisposable
     public ErnieDecoder Decoder { get; }
 
     /// <summary>
-    /// Loads a model from a directory holding <c>model.safetensors</c>, <c>config.json</c> and
-    /// <c>tokenizer.json</c>.
+    /// Loads a model from a directory holding <c>config.json</c>, <c>tokenizer.json</c> and the
+    /// weights as either <c>model.gguf</c> or <c>model.safetensors</c>.
     /// </summary>
+    /// <remarks>
+    /// A quantized directory is the published one with <c>model.safetensors</c> replaced by a
+    /// <c>model.gguf</c> that <c>PaddleOcrSharp.Quantize</c> wrote; everything else — the config,
+    /// the tokenizer, the preprocessor settings — is the checkpoint's own and unchanged. The GGUF
+    /// is preferred when both are present, since a directory holding both is one mid-conversion.
+    /// </remarks>
     public static PaddleOcrVLModel Load(string directory)
     {
         ModelConfiguration configuration = ModelConfiguration.Load(directory);
         var tokenizer = BpeTokenizer.FromFile(Path.Combine(directory, "tokenizer.json"));
-        WeightStore weights = WeightStore.Open(Path.Combine(directory, "model.safetensors"));
+        WeightStore weights = WeightStore.Open(WeightsPath(directory));
         return new PaddleOcrVLModel(weights, ownsWeights: true, configuration, tokenizer);
+    }
+
+    /// <summary>The weight file a model directory will be loaded from.</summary>
+    /// <param name="directory">A model directory.</param>
+    /// <exception cref="FileNotFoundException">Neither container is present.</exception>
+    public static string WeightsPath(string directory)
+    {
+        string gguf = Path.Combine(directory, "model.gguf");
+        if (File.Exists(gguf))
+        {
+            return gguf;
+        }
+
+        string safetensors = Path.Combine(directory, "model.safetensors");
+        return File.Exists(safetensors)
+            ? safetensors
+            : throw new FileNotFoundException(
+                $"'{directory}' holds neither model.gguf nor model.safetensors.", safetensors);
     }
 
     /// <summary>Builds a model over an already-open checkpoint, for tests and tooling.</summary>

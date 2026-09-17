@@ -18,6 +18,7 @@ libtorch, or any other third-party inference engine.**
 | Layout detection, block cropping, block-level VL recognition | PP-StructureV3, PP-ChatOCR, table-cell detectors |
 | Markdown / JSON assembly, OTSL→HTML table conversion | Serving (HPS/Triton), distributed inference |
 | CPU inference (SIMD-accelerated); GPU is a possible future backend | vLLM / SGLang / FastDeploy back-ends |
+| Ternary weight quantization of the VL model (`docs/ternary.md`) | Quantizing the Paddle graph models; quantized activations |
 
 ## Upstream references used
 
@@ -113,6 +114,8 @@ dotnet/
     PaddleOcrSharp/            # the library — everything below is here
       Core/                    # Tensor<T>, pooled buffers, SIMD kernels, GEMM
       Formats/                 # safetensors + paddle .pdiparams readers, bf16/f16
+      Formats/Gguf/            # GGUF v3 container and the ternary block layouts
+      Quantization/            # ternary quantizer, Hadamard rotation, calibration
       Imaging/                 # SkiaSharp decode, smart_resize, normalize, patchify
       Text/                    # tokenizer (tokenizer.json BPE), chat template
       Models/Vision/           # SigLIP/NaViT encoder + projector
@@ -128,6 +131,7 @@ dotnet/
     PaddleOcrSharp.Tests/      # unit + numerical-parity tests
   tools/
     reference/                 # Python scripts that dump upstream reference tensors
+    PaddleOcrSharp.Quantize/   # converts a checkpoint to ternary GGUF, and validates it
 ```
 
 ## Two bicubic resizes, deliberately
@@ -1045,6 +1049,62 @@ while looking entirely reasonable.
 
 A third, related: an indexed accumulator — an array or a `stackalloc` span — is never
 enregistered, so the chains have to be named locals.
+
+## Ternary weights
+
+The VL model can be stored with `{-1, 0, +1}` weights and one fp16 scale per 128 of them, in the
+two packings the Bonsai family uses. `dotnet/docs/ternary.md` is the design; this is what a reader
+of this file needs to know.
+
+**The encoding is Bonsai's, byte for byte.** `PQ2_0` (ggml type 142) is 34 bytes per 128 weights —
+2.125 bpw, two bits each, codes meaning `{-1, 0, +1, +2}`. `PTQ1_0` (143) is 28 bytes — **1.75 bpw
+exactly**, five base-3 digits to a byte, stored as `ceil(v·256/243)` so the decoder recovers digit
+`n` with a `uint8` multiply by `3ⁿ` and a shift. `Formats/Gguf/TernaryBlocks.cs` is a transcription
+of `quantize_row_*_ref` in the `PrismML-Eng/llama.cpp` fork, checked byte-for-byte against both the
+compiled C and an independent Python transcription (`tools/reference/dump_ternary_blocks.py`);
+`Quantization/TernaryKernels.cs` is the same function written for the machine, and a test asserts
+the two agree exactly rather than closely.
+
+**What does not transfer is the part that matters.** Those `quantize_row_*_ref` functions are
+container writers: they take `d = amax` and round, which is exact when the weights arriving are
+already ternary — the case a quantization-aware training run produces and we will never be in.
+`quantize_ptq1_0` even discards its imatrix argument, with the comment that "ternary codes come
+from the weights themselves". So Bonsai's quality comes from training, not from the format, and
+post-training ternarization of a 0.9B OCR model is a different proposition from a QAT'd 27B.
+`Quantization/TernaryQuantizer.cs` is where that gap is fought: a per-group scale search (`amax` is
+optimal only for an already-ternary group), the fixed blockwise Hadamard rotation, and GPTQ error
+feedback against activations collected by running the bf16 model.
+
+**The rotation is the piece worth having.** `R = (1/√n)·Hₙ·S` with `Hₙ` the Sylvester–Walsh matrix
+and `S` a fixed ±1 diagonal; weights are folded as `W ← W Rᵀ` and the activation gets `R x` before
+the product. `R` is orthogonal, so the function is unchanged and only the distribution moves —
+which is the whole point, because sub-2-bit error is set by the ratio of a group's largest
+magnitude to its typical one. The file carries it under the fork's own `prism.hadamard.*` keys,
+including the **explicit list of tensors it applies to**: a rotation applied to some of a layer's
+matrices and not the others is not a worse model, it is a different one, and it fails silently, so
+a file that cannot name them is refused rather than run.
+
+**The runner is not a second model.** Every matrix in both hand-ported halves already goes through
+`Gemm.Linear(x, rows, inner, WeightMatrix, bias, y, cols)`, and `WeightMatrix` already keeps its
+storage in the on-disk dtype and widens it inside the kernel. Quantized storage is a third kind on
+that type, so the tower, the decoder and the pipeline are untouched. The existing split does the
+rest: `RunPanel` decodes a column panel once and reuses it across every activation row, so prefill
+and the vision tower gain footprint and not time, while `RunNarrow`/`Dot4` — what a decode step
+takes — reads the packed bytes directly, which is where the win is. **Expected, not measured:** a
+token currently re-reads 721 MB of bf16 weights, and at 1.75 bpw that is 79 MB. How much of that
+becomes time depends on unpack throughput rather than on bandwidth, which is the first thing to
+profile once there is a real converted checkpoint to profile.
+
+**One shape does not fit.** A block covers 128 weights along the input axis, and the vision MLP's
+second projection is 4304 wide, which 128 does not divide — 134 M parameters over 27 layers that
+stay bfloat16. The converter reports it rather than failing, and it is the largest single thing a
+future group size or a transposed layout would buy.
+
+**Precision is per tensor, decided by measurement.** Bonsai 2 keeps a named handful of tensors at
+full precision for 0.0976% of its parameters; the lesson is the shape of that decision rather than
+the list. `QuantizationPolicy` is therefore a JSON file of globs, and `docs/ternary.md` sets out the
+four levels a policy is judged on — codec bytes, per-tensor error, stage parity, page text — because
+none of them predicts the next.
 
 ## What the pipeline does beyond the models
 
