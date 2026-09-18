@@ -290,7 +290,7 @@ Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigate
       then rotation as the fork does it; fold and apply are one implementation so they cannot drift.
 - [x] `WeightMatrix` gains quantized storage and `Gemm` applies a weight's rotation to the
       activation, so the tower, the decoder and the pipeline are unchanged.
-- [x] `TernaryQuantizer`: per-group scale search, GPTQ error feedback with a Cholesky of the damped
+- [x] `WeightQuantizer`: per-group scale search, GPTQ error feedback with a Cholesky of the damped
       Hessian, per-tensor error report.
 - [x] `ActivationRecorder`: `H = Σ xᵀx` per weight while the bf16 model runs, as an `AsyncLocal`
       scope, split into passes that fit a memory budget.

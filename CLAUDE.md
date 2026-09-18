@@ -114,8 +114,8 @@ dotnet/
     PaddleOcrSharp/            # the library — everything below is here
       Core/                    # Tensor<T>, pooled buffers, SIMD kernels, GEMM
       Formats/                 # safetensors + paddle .pdiparams readers, bf16/f16
-      Formats/Gguf/            # GGUF v3 container and the ternary block layouts
-      Quantization/            # ternary quantizer, Hadamard rotation, calibration
+      Formats/Gguf/            # GGUF v3 container, ternary and integer block layouts
+      Quantization/            # weight quantizer, Hadamard rotation, policy, calibration
       Imaging/                 # SkiaSharp decode, smart_resize, normalize, patchify
       Text/                    # tokenizer (tokenizer.json BPE), chat template
       Models/Vision/           # SigLIP/NaViT encoder + projector
@@ -1071,7 +1071,7 @@ already ternary — the case a quantization-aware training run produces and we w
 `quantize_ptq1_0` even discards its imatrix argument, with the comment that "ternary codes come
 from the weights themselves". So Bonsai's quality comes from training, not from the format, and
 post-training ternarization of a 0.9B OCR model is a different proposition from a QAT'd 27B.
-`Quantization/TernaryQuantizer.cs` is where that gap is fought: a per-group scale search (`amax` is
+`Quantization/WeightQuantizer.cs` is where that gap is fought: a per-group scale search (`amax` is
 optimal only for an already-ternary group), the fixed blockwise Hadamard rotation, and GPTQ error
 feedback against activations collected by running the bf16 model.
 
