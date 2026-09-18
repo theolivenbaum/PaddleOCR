@@ -1108,12 +1108,13 @@ machine, one sitting, loading excluded:
 | per-tensor relative error, worst | 0.5321 (`lm_head`) | 0.4339 |
 | lowest row cosine | 0.1758 | 0.8716 |
 | vision tower output cosine | 0.330 | 0.472 |
-| character accuracy | **0.00%** | — |
-| recognition | 16.7 s bf16 → 61.8 s quantized | — |
+| character accuracy | **0.00%** | **0.00%** |
+| recognition against 16-17 s of bf16 | 61.8 s (0.27x) | 186.5 s (0.09x) |
 
 The reference reads `www.997788.com 中国收藏热线 / 登机牌 BOARDING PASS / 航班 FLIGHT …`; the
-quantized model reads `POOOOO / IOOOOOOOEEEEOOOEEE…`. The rotation is a real improvement at every
-level and does not come close to crossing the gap.
+quantized model reads `POOOOO / IOOOOOOOEEEEOOOEEE…`, and the rotated one a runaway
+`Selected |T]^…被47组的333333…`. The rotation is a real improvement at every level a tensor can be
+measured on and none at all at the level anyone cares about.
 
 This is the outcome the design predicted, for the reason it gave: the fork's encoders are
 containers for weights that are *already* ternary, and Bonsai's are ternary because of

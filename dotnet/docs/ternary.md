@@ -383,9 +383,17 @@ outlier ratio.
 | lowest row cosine | 0.1758 | **0.8716** |
 | rows collapsed to zero | many | **0** |
 | vision tower cosine | 0.330 | **0.472** |
+| character accuracy | 0.00% | **0.00%** |
+| recognition | 61.8 s (0.27x) | 186.5 s (**0.09x**) |
 
-A real improvement at every level, and nowhere near enough: a tower output at cosine 0.47 is not a
-slightly degraded tower, and the text does not recover.
+A real improvement at every level that a tensor can be measured on, and none at all at the only
+level anyone cares about. The rotated model returns a different kind of garbage — a runaway
+`Selected |T]^…被47组的33333333333333…` rather than `POOOOO / IOOOEEEE…` — which is what a broken
+decoder looks like when the input embedding it is reading is merely wrong instead of degenerate.
+
+It is also three times slower again, because every `Gemm.Linear` call now runs a Walsh–Hadamard
+transform over its activation and `q`, `k` and `v` each redo the same one. The fork memoizes
+exactly that; this port does not yet, and a decode that never terminates pays it on every token.
 
 ### The verdict, and it is not close
 

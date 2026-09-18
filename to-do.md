@@ -304,7 +304,8 @@ Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigate
       cosine 0.330, and the boarding pass comes back as `POOOOO / IOOOOEEEE...`. With the rotation
       (block 128, the only one this model's widths admit) the tensor numbers improve a lot — worst
       error 0.53 -> 0.43, lowest row cosine 0.18 -> 0.87, no collapsed rows — and the tower reaches
-      only 0.472. `docs/ternary.md` §8 is the full account.
+      only 0.472, the text is still 0.00%, and it is three times slower again (0.09x) because every
+      `Gemm.Linear` call redoes the transform. `docs/ternary.md` §8 is the full account.
 - [x] Five defects the real conversion found and synthetic tensors could not: an `f32` exemption
       upcasting a bfloat16 checkpoint (75 -> 151 MB on a tensor the port never reads), rank-1
       tensors counted as `n x n` (1884 M against a real 959 M), an fp16 scale fallback that
