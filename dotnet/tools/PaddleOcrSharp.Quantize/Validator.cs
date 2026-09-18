@@ -63,7 +63,7 @@ internal static class Validator
 
         Console.WriteLine("tensor                                                     type      rel.err  worst cos");
 
-        var rows = new List<(string Name, string Type, double Error, double Cosine, long Collapsed)>();
+        var rows = new List<(string Name, string Type, double Error, double Cosine, long Degenerate)>();
 
         foreach (string name in target.Names.Order(StringComparer.Ordinal))
         {
@@ -91,15 +91,15 @@ internal static class Validator
             {
                 rotation.Fold(original, count, cols);
             }
-            (double error, double cosine, long collapsed) = RowStatistics(original, decoded, count, cols);
-            rows.Add((name, stored.Type.TypeName(), error, cosine, collapsed));
+            (double error, double cosine, long degenerate) = RowStatistics(original, decoded, count, cols);
+            rows.Add((name, stored.Type.TypeName(), error, cosine, degenerate));
         }
 
-        foreach ((string name, string type, double error, double cosine, long collapsed) in
+        foreach ((string name, string type, double error, double cosine, long degenerate) in
                  rows.OrderByDescending(row => row.Error).Take(20))
         {
             Console.WriteLine(
-                $"{name,-58} {type,-8} {error,8:F4}  {cosine,9:F4}{(collapsed > 0 ? $"  {collapsed} collapsed" : string.Empty)}");
+                $"{name,-58} {type,-8} {error,8:F4}  {cosine,9:F4}{(degenerate > 0 ? $"  {degenerate} degenerate" : string.Empty)}");
         }
 
         if (rows.Count > 20)
@@ -112,7 +112,7 @@ internal static class Validator
             Console.WriteLine(
                 $"mean relative error {rows.Average(row => row.Error):F4}, "
                 + $"lowest row cosine {rows.Min(row => row.Cosine):F4}, "
-                + $"{rows.Sum(row => row.Collapsed)} rows collapsed to zero");
+                + $"{rows.Sum(row => row.Degenerate)} degenerate rows excluded");
         }
     }
 
@@ -161,7 +161,7 @@ internal static class Validator
         Console.WriteLine($"  quantized: {Preview(actual)}");
     }
 
-    private static (double Error, double Cosine, long Collapsed) RowStatistics(
+    private static (double Error, double Cosine, long Degenerate) RowStatistics(
         ReadOnlySpan<float> original, ReadOnlySpan<float> decoded, int rows, int cols)
     {
         double total = 0;
@@ -196,8 +196,8 @@ internal static class Validator
 
         // The same rule the converter reports under, so the two cannot disagree about the same
         // file — which they did, and resolving it is what found the fp16 scale fallback.
-        (double worst, long collapsed) = WeightQuantizer.WorstCosine(dots, sourceNorms, targetNorms);
-        return (energy > 0 ? Math.Sqrt(total / energy) : 0, worst, collapsed);
+        (double worst, long degenerate) = WeightQuantizer.WorstCosine(dots, sourceNorms, targetNorms);
+        return (energy > 0 ? Math.Sqrt(total / energy) : 0, worst, degenerate);
     }
 
     private static double Cosine(ReadOnlySpan<float> a, ReadOnlySpan<float> b)

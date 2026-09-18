@@ -133,7 +133,7 @@ internal static class Converter
                     $"  {entry.Name,-58} {report.Scheme.TypeName(),-7} "
                     + $"err {report.RelativeError,6:F4}  worst cos {report.WorstRowCosine,6:F4}  "
                     + $"zeros {report.ZeroFraction,5:P0}"
-                    + $"{(report.CollapsedRows > 0 ? $"  {report.CollapsedRows} collapsed" : string.Empty)}"
+                    + $"{(report.DegenerateRows > 0 ? $"  {report.DegenerateRows} degenerate" : string.Empty)}"
                     + $"{(hessian is null ? string.Empty : "  gptq")}");
             }
 
@@ -157,7 +157,7 @@ internal static class Converter
             Console.WriteLine(
                 $"lowest row cosine {reports.Min(report => report.WorstRowCosine):F4} on "
                 + $"{reports.MinBy(report => report.WorstRowCosine).Name}; "
-                + $"{reports.Sum(report => report.CollapsedRows)} rows collapsed to zero");
+                + $"{reports.Sum(report => report.DegenerateRows)} degenerate rows excluded");
         }
 
         if (settings.ReportPath is not null)

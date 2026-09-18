@@ -1110,11 +1110,18 @@ The ladder, measured on the real checkpoint against bf16, same image and machine
 | `q5_1` | 6.0 | 0.90 GB | 2.14x | 0.994 | 98.71% |
 | `q8_0` | 8.5 | 1.15 GB | 1.67x | 0.99990 | **identical** |
 
-**`q8_0` reproduces the bfloat16 output byte for byte.** The integer bands are ggml's own, over the
-same container, policy and runner, each checked byte-for-byte against the compiled C. The two
-four-bit bands are tied on this evidence — a single image's character accuracy resolves about a
+**`q8_0` reproduces the bfloat16 output byte for byte**, on all four images of a small corpus
+(the boarding pass above, a Chinese text crop and two English word crops) and not only on one.
+`q5_1` and `q4_1` are identical on three of those four and differ only on the boarding pass — which
+is less reassuring than it sounds, because the three crops are a few tokens each and discriminate
+nothing; the ordering below `q8_0` rests on that single dense image. The integer bands are ggml's own, over the same
+container, policy and runner, each checked byte-for-byte against the compiled C. The two four-bit
+bands are tied on this evidence — a single image's character accuracy resolves about a
 point — and the row worth reading is `q4_1`: within 70 MB of the ternary file, reading the page at
 93.57% where ternary reads it at zero.
+
+`q8_0` is now the default the converter produces unasked, because it is the band that measured zero
+loss — not because it is the smallest.
 
 Size is now bounded by something structural rather than by the bit rate. 278 MB of the 1.15 GB is
 bfloat16 that no band can touch, because the vision MLP's second projection is 4304 wide and

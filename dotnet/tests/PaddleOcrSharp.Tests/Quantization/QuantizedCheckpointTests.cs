@@ -29,9 +29,10 @@ public class QuantizedCheckpointTests : IDisposable
         QuantizationPolicy policy = QuantizationPolicy.Recommended;
 
         // lm_head is 106 M parameters re-read on every generated token, so it is the one tensor
-        // whose quantization the whole decode win rests on.
-        Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("lm_head.weight"));
-        Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("model.layers.4.self_attn.q_proj.weight"));
+        // whose quantization the whole decode win rests on. The default band is the one that
+        // measured zero loss on the real checkpoint, not the smallest one available.
+        Assert.Equal(GgmlType.Q8_0, policy.SchemeFor("lm_head.weight"));
+        Assert.Equal(GgmlType.Q8_0, policy.SchemeFor("model.layers.4.self_attn.q_proj.weight"));
         // The exemptions keep the checkpoint's own dtype rather than naming a float width.
         // Naming one can only upcast a bfloat16 checkpoint, which on the real model turned 75 MB
         // of position embedding into 151 MB for nothing.
@@ -40,9 +41,9 @@ public class QuantizedCheckpointTests : IDisposable
 
         // The embedding and the unused packing table are quantized; the small interpolated
         // position grid, which the glob would otherwise catch, is not.
-        Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("model.embed_tokens.weight", GgmlType.BF16));
+        Assert.Equal(GgmlType.Q8_0, policy.SchemeFor("model.embed_tokens.weight", GgmlType.BF16));
         Assert.Equal(
-            GgmlType.PTQ1_0,
+            GgmlType.Q8_0,
             policy.SchemeFor("visual.vision_model.embeddings.packing_position_embedding.weight", GgmlType.BF16));
         Assert.Equal(
             GgmlType.BF16,

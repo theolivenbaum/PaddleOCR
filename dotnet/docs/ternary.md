@@ -421,6 +421,31 @@ And the row that matters for anyone choosing: `q4_1` is within 70 MB of the tern
 the page at 93.57% where ternary reads it at zero. The whole of ternary's remaining advantage is
 those 70 MB.
 
+### Across a corpus, and what that corpus is worth
+
+One image is thin evidence for "identical", so the three bands worth considering were re-run over
+four text-bearing images from the repository's own demo assets — a photographed boarding pass, a
+Chinese text crop and two English word crops:
+
+| image | `q8_0` | `q5_1` | `q4_1` |
+| --- | --- | --- | --- |
+| `general_ocr_002.jpg` (boarding pass) | **identical** | 98.71% | 93.57% |
+| `rec_0.jpg` | **identical** | identical | identical |
+| `word_10.png` | **identical** | identical | identical |
+| `word_116.png` | **identical** | identical | identical |
+
+**`q8_0` is identical on all four**, which is the result this section exists to establish.
+
+The same table says plainly what the corpus is not worth. Three of its four images are identical at
+*every* band down to 4.5 bits, so they discriminate nothing: they are short crops whose whole output
+is a few tokens, and a few tokens survive almost any rounding. The only image that separates the
+bands is the one with a page's worth of text on it. So this corpus raises confidence in `q8_0` and
+says close to nothing about the ordering below it — for which the honest test is a multi-block
+scanned page, which needs the layout model and a longer run than this one.
+
+That is also a caveat on the ladder above: every number in it that is not `q8_0` comes from a single
+image.
+
 ### What the file size is now bounded by
 
 At `q8_0` the file is 1.15 GB, of which **278 MB is bfloat16 that no band can touch**: the vision

@@ -42,12 +42,14 @@ public sealed record QuantizationOptions(
 /// energy. The mean hides the failure that matters: one destroyed row is one destroyed attention
 /// head or one destroyed logit, and a thousand healthy rows do not make up for it.
 /// </param>
-/// <param name="CollapsedRows">
-/// Rows that were not zero and quantized to all zeros. These are reported rather than folded into
-/// <paramref name="WorstRowCosine"/>, because a row whose weights are a ten-millionth of the
-/// tensor's largest has no meaningful direction to preserve, and letting it set the headline makes
-/// the headline meaningless: on the first real conversion, 3.1% of one tensor's rows were around
-/// 1e-8 and they were what the worst cosine was reporting.
+/// <param name="DegenerateRows">
+/// Rows excluded from <paramref name="WorstRowCosine"/> because they carry effectively none of the
+/// tensor's energy — under a thousandth of the largest row's magnitude — or because they quantized
+/// to all zeros. They are counted rather than folded in: a row whose weights are a millionth of the
+/// tensor's largest has no direction worth preserving, and letting one set the headline makes the
+/// headline meaningless. On the real checkpoint a single vision projection has 135 such rows, and
+/// before they were excluded they were what the worst cosine reported — 0.18 at ternary and 0.24 at
+/// eight bits, on tensors whose real rows sit at 0.9999.
 /// </param>
 /// <param name="ZeroFraction">Share of weights that quantized to the zero trit.</param>
 /// <param name="Bytes">Bytes the packed tensor occupies.</param>
@@ -59,7 +61,7 @@ public readonly record struct TensorQuantizationReport(
     bool Rotated,
     double RelativeError,
     double WorstRowCosine,
-    long CollapsedRows,
+    long DegenerateRows,
     double ZeroFraction,
     long Bytes)
 {
@@ -597,7 +599,7 @@ public static class WeightQuantizer
             targetNorms[r] = normB;
         }
 
-        (double worst, long collapsed) = WorstCosine(dots, sourceNorms, targetNorms);
+        (double worst, long degenerate) = WorstCosine(dots, sourceNorms, targetNorms);
 
         return new TensorQuantizationReport(
             name,
@@ -607,25 +609,25 @@ public static class WeightQuantizer
             rotated,
             energy > 0 ? Math.Sqrt(total / energy) : 0,
             worst,
-            collapsed,
+            degenerate,
             (double)zeros / ((long)rows * cols),
             bytes);
     }
 
     /// <summary>
-    /// The smallest row cosine among rows that carry any of the tensor's energy, and how many rows
-    /// collapsed to zero.
+    /// The smallest row cosine among rows that carry any of the tensor's energy, and how many were
+    /// excluded as degenerate.
     /// </summary>
     /// <param name="dots">Per-row dot product of the original and quantized rows.</param>
     /// <param name="sourceNorms">Per-row squared norm of the original rows.</param>
     /// <param name="targetNorms">Per-row squared norm of the quantized rows.</param>
     /// <remarks>
     /// A checkpoint has rows that are numerically dead — one vision projection has 135 rows whose
-    /// largest weight is around 1e-8 against a tensor maximum of 0.33. Ternary cannot preserve a
+    /// largest weight is around 1e-8 against a tensor maximum of 0.33. No band can preserve a
     /// direction there and nothing downstream needs it to, so letting those rows set the worst-case
     /// figure reports a catastrophe that is not one. They are counted instead.
     /// </remarks>
-    public static (double Worst, long Collapsed) WorstCosine(
+    public static (double Worst, long Degenerate) WorstCosine(
         ReadOnlySpan<double> dots, ReadOnlySpan<double> sourceNorms, ReadOnlySpan<double> targetNorms)
     {
         double largest = 0;
@@ -634,29 +636,27 @@ public static class WeightQuantizer
             largest = Math.Max(largest, sourceNorms[r]);
         }
 
-        // A millionth of the largest row's energy: far below anything that carries signal, far
-        // above the 1e-16 ratio the dead rows sit at.
-        double floor = largest * 1e-12;
+        // These are squared norms, so 1e-6 here is a thousandth of the largest row's magnitude. The
+        // first floor tried was 1e-12 — a millionth in magnitude — and it was too permissive to do
+        // its job: the rows that dominate a checkpoint's worst cosine sit around 1e-5 against a
+        // tensor maximum of 0.3, where the fp16 *scale* is near the bottom of its exponent range and
+        // carries a bit or two. Such a row contributes under a tenth of a percent to any product.
+        double floor = largest * 1e-6;
 
         double worst = 1.0;
-        long collapsed = 0;
+        long degenerate = 0;
 
         for (int r = 0; r < sourceNorms.Length; r++)
         {
-            if (sourceNorms[r] <= floor)
+            if (sourceNorms[r] <= floor || targetNorms[r] <= 0)
             {
-                continue;
-            }
-
-            if (targetNorms[r] <= 0)
-            {
-                collapsed++;
+                degenerate++;
                 continue;
             }
 
             worst = Math.Min(worst, dots[r] / Math.Sqrt(sourceNorms[r] * targetNorms[r]));
         }
 
-        return (worst, collapsed);
+        return (worst, degenerate);
     }
 }

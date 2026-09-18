@@ -43,7 +43,7 @@ public sealed record RotationPolicy(int BlockSize = 0, string SignMode = "identi
 public sealed class QuantizationPolicy
 {
     /// <summary>The scheme for tensors no rule matches.</summary>
-    public string DefaultScheme { get; init; } = "ptq1_0";
+    public string DefaultScheme { get; init; } = "q8_0";
 
     /// <summary>Rules, applied in order; the first match wins.</summary>
     public IReadOnlyList<QuantizationRule> Rules { get; init; } = [];
@@ -52,8 +52,8 @@ public sealed class QuantizationPolicy
     public RotationPolicy Rotation { get; init; } = new();
 
     /// <summary>
-    /// The port's starting policy for PaddleOCR-VL: ternary weights everywhere the model spends
-    /// its bandwidth, and float everywhere a matrix product is not what happens.
+    /// The port's default policy for PaddleOCR-VL: <c>q8_0</c> everywhere the model spends its
+    /// bandwidth, and the checkpoint's own dtype everywhere a matrix product is not what happens.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -85,7 +85,7 @@ public sealed class QuantizationPolicy
     /// </remarks>
     public static QuantizationPolicy Recommended { get; } = new()
     {
-        DefaultScheme = "ptq1_0",
+        DefaultScheme = "q8_0",
         Rules =
         [
             new QuantizationRule("*norm*", "source"),

@@ -313,21 +313,34 @@ Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigate
       whose weights are 1e-8, and a validator comparing rotated weights against an unrotated
       source. All fixed; the last two were found only because two implementations disagreed about
       the same file.
-- [ ] **Measure a 4-bit band.** The per-tensor errors cluster at 0.44, which is what `log₂3` bits
-      buys on weights this dense. Everything here except the choice of block layout is indifferent
-      to bit width, so this is the cheapest experiment with a chance of shipping.
-- [ ] **Measure a split policy** — ternary in the decoder, bfloat16 in the vision tower. The
-      bandwidth is in the decoder and the error hurts most in the tower; the policy mechanism
-      already expresses it.
+- [x] **Integer bands, and zero loss.** `Q4_0`, `Q4_1`, `Q5_1` and `Q8_0` over the same container,
+      policy and runner, each byte-identical to the compiled C reference. Measured against bf16:
+      ptq1_0 0.72 GB at 0.00% character accuracy, q4_0 0.74 GB at 94.86%, q4_1 0.79 GB at 93.57%,
+      q5_1 0.90 GB at 98.71%, **q8_0 1.15 GB with the text byte-identical on all four corpus
+      images**. `q8_0` is now the default. The two four-bit bands are tied rather than ordered on
+      this evidence.
+- [x] Freed the two remaining big exemptions — the token embedding (106 M) and
+      `packing_position_embedding` (37.7 M, never read by this port) — taking the quantized share
+      from 70.3% to 85.3%.
+- [ ] **A corpus that discriminates.** Three of the four images are identical at every band down to
+      4.5 bits: they are few-token crops and rule nothing out. Everything below `q8_0` rests on one
+      dense image. The real test is multi-block scanned pages, which needs `PP-DocLayoutV3` and a
+      longer run than this environment has had.
+- [ ] **Measure a split policy** if a band between 1.67x and 2.14x is wanted. The vision tower is
+      48.6% of the model, so `q8_0` there with `q4_1` elsewhere lands near 0.93 GB — barely better
+      than `q5_1` everywhere at 0.89 GB, which is why uniform bands are what got measured.
 - [ ] Run GPTQ against the real model. Implemented and tested on synthetic tensors, never run on
       the checkpoint: it needs a calibration corpus, which this environment did not have.
 - [ ] Re-measure cost after the panel-width fix. Quantized recognition was **0.27x** — slower, not
       faster — and `ChoosePanelWidth` sizing the panel by its packed stride is one identified
       cause but probably not the whole of it. A decode-heavy page under `parse --profile` is what
       would actually test the premise, and it needs a model whose decode terminates.
-- [ ] The vision MLP's 4304-wide projection cannot be packed at group 128 — 139 M parameters,
-      14.5% of the model, that stay bfloat16. A narrower group or a transposed layout is the only
-      way to reach it, and it is most of why 1.75 bpw yields 2.68x rather than 9x.
+- [ ] **The 4304-wide vision projection is now the binding limit on size**: 4304 = 16 x 269 divides
+      by neither the ternary group of 128 nor the integer group of 32, so 139 M parameters — 278 MB
+      of the 1.15 GB `q8_0` file — stay bfloat16. Its other dimension is 1152 and divides both, so
+      storing it transposed and reducing along rows reaches it; `Gemm.MatMul` already has a kernel
+      in that shape. Worth about 130 MB, and it is a runner change, so it belongs with the speed
+      work.
 - [ ] Hoist the activation rotation: `q`/`k`/`v` each rotate the same normed activation, which the
       fork memoizes. The rotated model was markedly slower still, so this now has a reason.
 
