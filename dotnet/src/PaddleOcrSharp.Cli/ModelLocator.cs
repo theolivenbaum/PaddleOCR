@@ -93,10 +93,14 @@ public static class ModelLocator
 
         if (!string.IsNullOrEmpty(explicitPath))
         {
-            if (!File.Exists(Path.Combine(explicitPath, "model.safetensors")))
+            // Either container will do: a quantized directory holds model.gguf where a published
+            // one holds model.safetensors, and PaddleOcrVLModel.Load takes whichever is present.
+            // Checking only for the safetensors made --model-dir unable to name a converted model.
+            if (!File.Exists(Path.Combine(explicitPath, "model.gguf"))
+                && !File.Exists(Path.Combine(explicitPath, "model.safetensors")))
             {
                 throw new DirectoryNotFoundException(
-                    $"'{explicitPath}' does not contain model.safetensors.");
+                    $"'{explicitPath}' contains neither model.gguf nor model.safetensors.");
             }
 
             return explicitPath;
