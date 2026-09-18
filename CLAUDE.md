@@ -1098,7 +1098,30 @@ stay bfloat16, 14.5% of the model. With the token embedding and a position table
 converted checkpoint is 2.68x smaller rather than the 9x the bit rate suggests. That, not the block
 layout, is where a future group size or a transposed layout would pay.
 
-### It does not work at this model size, and here is the measurement
+### Zero loss is reachable, at eight bits rather than two
+
+The ladder, measured on the real checkpoint against bf16, same image and machine throughout:
+
+| band | bpw | size | ratio | tower cosine | character accuracy |
+| --- | --- | --- | --- | --- | --- |
+| `ptq1_0` | 1.75 | 0.72 GB | 2.68x | 0.330 | **0.00%** |
+| `q4_0` | 4.5 | 0.74 GB | 2.59x | 0.976 | 94.86% |
+| `q4_1` | 5.0 | 0.79 GB | 2.42x | 0.980 | 93.57% |
+| `q5_1` | 6.0 | 0.90 GB | 2.14x | 0.994 | 98.71% |
+| `q8_0` | 8.5 | 1.15 GB | 1.67x | 0.99990 | **identical** |
+
+**`q8_0` reproduces the bfloat16 output byte for byte.** The integer bands are ggml's own, over the
+same container, policy and runner, each checked byte-for-byte against the compiled C. The two
+four-bit bands are tied on this evidence — a single image's character accuracy resolves about a
+point — and the row worth reading is `q4_1`: within 70 MB of the ternary file, reading the page at
+93.57% where ternary reads it at zero.
+
+Size is now bounded by something structural rather than by the bit rate. 278 MB of the 1.15 GB is
+bfloat16 that no band can touch, because the vision MLP's second projection is 4304 wide and
+4304 = 16 x 269 divides by neither the ternary group of 128 nor the integer group of 32. Reaching
+it means storing that tensor transposed and reducing along rows, which is a change to the runner.
+
+### Ternary itself does not work at this model size, and here is the measurement
 
 `PaddleOCR-VL-1.6` converted and compared against itself on a photographed boarding pass, one
 machine, one sitting, loading excluded:

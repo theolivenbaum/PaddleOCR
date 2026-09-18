@@ -395,28 +395,69 @@ It is also three times slower again, because every `Gemm.Linear` call now runs a
 transform over its activation and `q`, `k` and `v` each redo the same one. The fork memoizes
 exactly that; this port does not yet, and a decode that never terminates pays it on every token.
 
+### The integer bands, and where zero loss actually is
+
+Ternary failing is a fact about `log₂3` bits, not about the pipeline, so the same container, policy
+and runner were pointed at the ggml integer bands. Each is transcribed from `ggml-quants.c` and
+checked byte-for-byte against the compiled C on gaussian, off-centre, already-ternary, all-zero,
+single-outlier and uniform groups. Measured on the real checkpoint against bf16, same image and
+machine throughout:
+
+| band | bpw | size | ratio | tower cosine | character accuracy |
+| --- | --- | --- | --- | --- | --- |
+| `ptq1_0` | 1.75 | 0.72 GB | 2.68x | 0.330 | **0.00%** |
+| `q4_0` | 4.5 | 0.74 GB | 2.59x | 0.976 | 94.86% |
+| `q4_1` | 5.0 | 0.79 GB | 2.42x | 0.980 | 93.57% |
+| `q5_1` | 6.0 | 0.90 GB | 2.14x | 0.994 | 98.71% |
+| `q8_0` | 8.5 | 1.15 GB | 1.67x | 0.99990 | **identical** |
+
+**`q8_0` is a zero-loss conversion**: the recognised text is byte-identical to what the bfloat16
+model produces. Its mean per-tensor relative error is 0.0056 against ternary's 0.4477.
+
+Two things in that table are worth not glossing over. `q4_0` scoring above `q4_1` while being
+smaller and having the larger tensor error is a reminder that character accuracy on a single image
+resolves about a point, so the two four-bit bands are tied on this evidence rather than ordered.
+And the row that matters for anyone choosing: `q4_1` is within 70 MB of the ternary file and reads
+the page at 93.57% where ternary reads it at zero. The whole of ternary's remaining advantage is
+those 70 MB.
+
+### What the file size is now bounded by
+
+At `q8_0` the file is 1.15 GB, of which **278 MB is bfloat16 that no band can touch**: the vision
+MLP's second projection is 4304 wide, and 4304 = 16 x 269, which neither the ternary group of 128
+nor the integer group of 32 divides. That is 139 M parameters, 14.5% of the model, and it is the
+single largest remaining lever on size — worth about 130 MB at `q8_0`.
+
+Reaching it means storing that tensor transposed, since its other dimension is 1152 and divides
+both groups, and then reducing along rows rather than columns. `Gemm.MatMul` already has a kernel
+in that shape. It is a change to the runner rather than to the format, so it belongs with the
+speed work and not here.
+
+Two earlier exemptions were removed once the bands existed, because both were costing real size for
+no measured reason: the token embedding (106 M) and `packing_position_embedding` (37.7 M, a table
+this port never reads). Between them they took the quantized share from 70.3% to 85.3%.
+
 ### The verdict, and it is not close
 
-Ternary post-training quantization of this checkpoint does not work. That is the outcome §1.5
-predicted for the stated reason — Bonsai's ternary weights come out of quantization-aware training,
+Ternary post-training quantization of this checkpoint does not work, and nothing in the ladder
+above suggests it is close. That is the outcome §1.5 predicted for the stated reason — Bonsai's ternary weights come out of quantization-aware training,
 and the file format is a container for weights that are already ternary. Rotation and error
 feedback narrow the gap; they do not cross it at 0.9B on a task where one wrong glyph is a visible
 error.
 
-What the numbers say about where to go next, in order:
+The first of those next steps has now been taken and is the section above: an integer band over
+the same machinery, which reaches zero loss at `q8_0`. What is left, in order:
 
-1. **Stop at ternary for the whole model.** The per-tensor errors cluster at 0.44, which is what
-   `log₂3` bits buys on weights this dense. A 4-bit band over the same container machinery would
-   land near 0.1 and is the obvious next measurement, since every part of this project except the
-   choice of block layout is indifferent to the bit width.
-2. **Quantize selectively.** The policy mechanism exists for exactly this: the decoder's MLP is
-   where the bandwidth is, and the vision tower is where the error hurts most. A file that is
-   ternary in the decoder and bfloat16 in the tower is a five-minute experiment.
-3. **GPTQ.** Implemented and tested on synthetic tensors, but not yet run against the real model —
-   it needs a calibration corpus, which this environment did not have. It is worth measuring and
-   it will not rescue a 0.44 relative error on its own.
-4. **Distillation**, if ternary at this size is actually the goal. That is a training project, not
-   a quantization one.
+1. **Transpose the 4304-wide projection** so it can be quantized at all — 130 MB at `q8_0`, and
+   the only remaining structural limit on size.
+2. **GPTQ**, still implemented and tested on synthetic tensors and still never run against the real
+   model for want of a calibration corpus. It would matter most at four bits, where the ladder
+   shows real loss and 70 MB separates `q4_1` from ternary.
+3. **A mixed policy**, if a band between 1.67x and 2.14x is wanted. The vision tower is 48.6% of
+   the model, so `q8_0` there with `q4_1` elsewhere lands at about 0.93 GB — barely better than
+   `q5_1` everywhere at 0.89 GB, which is why uniform bands are what is measured here.
+4. **Distillation**, if ternary specifically is the goal. That is a training project, not a
+   quantization one.
 
 ### Five defects the real conversion found that the synthetic tests could not
 

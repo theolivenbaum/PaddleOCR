@@ -20,12 +20,20 @@ namespace PaddleOcrSharp.Quantize;
 /// </remarks>
 internal static class Validator
 {
-    public static int Run(string referenceDirectory, string quantizedDirectory, string[] images)
+    public static int Run(
+        string referenceDirectory, string quantizedDirectory, string[] images, bool compareTensors = true)
     {
         using PaddleOcrVLModel reference = PaddleOcrVLModel.Load(referenceDirectory);
         using PaddleOcrVLModel quantized = PaddleOcrVLModel.Load(quantizedDirectory);
 
-        CompareTensors(referenceDirectory, quantizedDirectory);
+        // L1 decodes every quantized weight in the file, which on this checkpoint is 818 M of them
+        // and several minutes. It answers "which tensor" when something is wrong; when a policy is
+        // already settled and the question is only whether the text holds up across a corpus, it
+        // is the same answer repeated per image set. `--tensors false` skips it.
+        if (compareTensors)
+        {
+            CompareTensors(referenceDirectory, quantizedDirectory);
+        }
 
         if (images.Length == 0)
         {

@@ -83,7 +83,8 @@ switch (verb)
             return 1;
         }
 
-        return Validator.Run(reference, quantized, [.. positional]);
+        bool compareTensors = !string.Equals(Option("tensors"), "false", StringComparison.OrdinalIgnoreCase);
+        return Validator.Run(reference, quantized, [.. positional], compareTensors);
     }
 
     case "inspect":
@@ -178,7 +179,7 @@ static void Usage()
                    [--calibration-budget-gb <n>] [--damping <d>] [--gptq-block <n>]
                    [--scale-search <steps>] [--scale-floor <fraction>] [--report <file.json>]
 
-          validate --reference <model dir> --quantized <model dir> [image …]
+          validate --reference <model dir> --quantized <model dir> [--tensors false] [image …]
 
           inspect  <file.gguf>
 
