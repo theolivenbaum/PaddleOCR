@@ -38,9 +38,16 @@ public sealed record QuantizationOptions(
 /// <c>‖W − Ŵ‖_F / ‖W‖_F</c> — how much of the tensor's energy the quantizer lost.
 /// </param>
 /// <param name="WorstRowCosine">
-/// The <i>smallest</i> cosine similarity over the output rows. The mean hides the failure that
-/// matters: one destroyed row is one destroyed attention head or one destroyed logit, and a
-/// thousand healthy rows do not make up for it.
+/// The <i>smallest</i> cosine similarity over the output rows that carry any of the tensor's
+/// energy. The mean hides the failure that matters: one destroyed row is one destroyed attention
+/// head or one destroyed logit, and a thousand healthy rows do not make up for it.
+/// </param>
+/// <param name="CollapsedRows">
+/// Rows that were not zero and quantized to all zeros. These are reported rather than folded into
+/// <paramref name="WorstRowCosine"/>, because a row whose weights are a ten-millionth of the
+/// tensor's largest has no meaningful direction to preserve, and letting it set the headline makes
+/// the headline meaningless: on the first real conversion, 3.1% of one tensor's rows were around
+/// 1e-8 and they were what the worst cosine was reporting.
 /// </param>
 /// <param name="ZeroFraction">Share of weights that quantized to the zero trit.</param>
 /// <param name="Bytes">Bytes the packed tensor occupies.</param>
@@ -52,6 +59,7 @@ public readonly record struct TensorQuantizationReport(
     bool Rotated,
     double RelativeError,
     double WorstRowCosine,
+    long CollapsedRows,
     double ZeroFraction,
     long Bytes)
 {
@@ -223,11 +231,23 @@ public static class TernaryQuantizer
             }
         }
 
-        // The scale is stored as fp16, so quantize against the value the decoder will actually see.
+        // The scale is stored as fp16, so quantize against the value the decoder will actually
+        // see. Falling back to the unrounded `amax` when the search underflows would quantize
+        // against a scale the file cannot hold, and the converter's own report would then describe
+        // numbers it did not write — which is exactly what happened on the first real conversion,
+        // on rows whose weights are around 1e-8 and whose scale is below fp16's smallest
+        // subnormal. A group whose scale cannot be represented is a zero group, because that is
+        // what the decoder will produce from it.
         float scale = (float)(Half)bestScale;
         if (scale <= 0f)
         {
-            scale = amax;
+            scale = (float)(Half)amax;
+        }
+
+        if (scale <= 0f)
+        {
+            group.Clear();
+            return;
         }
 
         for (int i = 0; i < group.Length; i++)
@@ -524,8 +544,11 @@ public static class TernaryQuantizer
     {
         double total = 0;
         double energy = 0;
-        double worst = 1.0;
         long zeros = 0;
+
+        double[] dots = new double[rows];
+        double[] sourceNorms = new double[rows];
+        double[] targetNorms = new double[rows];
 
         for (int r = 0; r < rows; r++)
         {
@@ -550,11 +573,12 @@ public static class TernaryQuantizer
                 }
             }
 
-            if (normA > 0 && normB > 0)
-            {
-                worst = Math.Min(worst, dot / Math.Sqrt(normA * normB));
-            }
+            dots[r] = dot;
+            sourceNorms[r] = normA;
+            targetNorms[r] = normB;
         }
+
+        (double worst, long collapsed) = WorstCosine(dots, sourceNorms, targetNorms);
 
         return new TensorQuantizationReport(
             name,
@@ -564,7 +588,56 @@ public static class TernaryQuantizer
             rotated,
             energy > 0 ? Math.Sqrt(total / energy) : 0,
             worst,
+            collapsed,
             (double)zeros / ((long)rows * cols),
             bytes);
+    }
+
+    /// <summary>
+    /// The smallest row cosine among rows that carry any of the tensor's energy, and how many rows
+    /// collapsed to zero.
+    /// </summary>
+    /// <param name="dots">Per-row dot product of the original and quantized rows.</param>
+    /// <param name="sourceNorms">Per-row squared norm of the original rows.</param>
+    /// <param name="targetNorms">Per-row squared norm of the quantized rows.</param>
+    /// <remarks>
+    /// A checkpoint has rows that are numerically dead — one vision projection has 135 rows whose
+    /// largest weight is around 1e-8 against a tensor maximum of 0.33. Ternary cannot preserve a
+    /// direction there and nothing downstream needs it to, so letting those rows set the worst-case
+    /// figure reports a catastrophe that is not one. They are counted instead.
+    /// </remarks>
+    public static (double Worst, long Collapsed) WorstCosine(
+        ReadOnlySpan<double> dots, ReadOnlySpan<double> sourceNorms, ReadOnlySpan<double> targetNorms)
+    {
+        double largest = 0;
+        for (int r = 0; r < sourceNorms.Length; r++)
+        {
+            largest = Math.Max(largest, sourceNorms[r]);
+        }
+
+        // A millionth of the largest row's energy: far below anything that carries signal, far
+        // above the 1e-16 ratio the dead rows sit at.
+        double floor = largest * 1e-12;
+
+        double worst = 1.0;
+        long collapsed = 0;
+
+        for (int r = 0; r < sourceNorms.Length; r++)
+        {
+            if (sourceNorms[r] <= floor)
+            {
+                continue;
+            }
+
+            if (targetNorms[r] <= 0)
+            {
+                collapsed++;
+                continue;
+            }
+
+            worst = Math.Min(worst, dots[r] / Math.Sqrt(sourceNorms[r] * targetNorms[r]));
+        }
+
+        return (worst, collapsed);
     }
 }

@@ -3,6 +3,7 @@ using PaddleOcrSharp.Formats.Gguf;
 using PaddleOcrSharp.Imaging;
 using PaddleOcrSharp.Models;
 using PaddleOcrSharp.Models.Vision;
+using PaddleOcrSharp.Quantization;
 
 namespace PaddleOcrSharp.Quantize;
 
@@ -50,10 +51,11 @@ internal static class Validator
     {
         using var source = WeightStore.Open(PaddleOcrVLModel.WeightsPath(referenceDirectory));
         using GgufFile target = GgufFile.Open(PaddleOcrVLModel.WeightsPath(quantizedDirectory));
+        QuantizationMetadata metadata = QuantizationMetadata.Read(target);
 
         Console.WriteLine("tensor                                                     type      rel.err  worst cos");
 
-        var rows = new List<(string Name, string Type, double Error, double Cosine)>();
+        var rows = new List<(string Name, string Type, double Error, double Cosine, long Collapsed)>();
 
         foreach (string name in target.Names.Order(StringComparer.Ordinal))
         {
@@ -63,20 +65,33 @@ internal static class Validator
                 continue;
             }
 
-            float[] original = source.Vector(name);
+            // Not source.Vector: that caches, and caching every widened tensor of a 0.9B
+            // checkpoint is 3.8 GB of float32 held for the length of the comparison.
+            float[] original = source.Tensor(name).ToFloats();
             float[] decoded = new float[stored.ElementCount];
             TernaryBlocks.Decode(stored.Type, stored.Bytes.Span, decoded);
 
             int cols = checked((int)stored.RowLength);
             int count = checked((int)stored.RowCount);
-            (double error, double cosine) = RowStatistics(original, decoded, count, cols);
-            rows.Add((name, stored.Type.TypeName(), error, cosine));
+
+            // A rotated tensor holds W Rᵀ, which has no elementwise relationship to W at all.
+            // Comparing the two directly reports a relative error above one and negative cosines —
+            // which is what this did before, and it looked exactly like a catastrophic conversion
+            // rather than like a comparison made in the wrong basis. The source is folded the same
+            // way so both sides are in the basis the file is written in.
+            if (metadata.For(name) is { } rotation)
+            {
+                rotation.Fold(original, count, cols);
+            }
+            (double error, double cosine, long collapsed) = RowStatistics(original, decoded, count, cols);
+            rows.Add((name, stored.Type.TypeName(), error, cosine, collapsed));
         }
 
-        foreach ((string name, string type, double error, double cosine) in
+        foreach ((string name, string type, double error, double cosine, long collapsed) in
                  rows.OrderByDescending(row => row.Error).Take(20))
         {
-            Console.WriteLine($"{name,-58} {type,-8} {error,8:F4}  {cosine,9:F4}");
+            Console.WriteLine(
+                $"{name,-58} {type,-8} {error,8:F4}  {cosine,9:F4}{(collapsed > 0 ? $"  {collapsed} collapsed" : string.Empty)}");
         }
 
         if (rows.Count > 20)
@@ -88,7 +103,8 @@ internal static class Validator
         {
             Console.WriteLine(
                 $"mean relative error {rows.Average(row => row.Error):F4}, "
-                + $"lowest row cosine {rows.Min(row => row.Cosine):F4}");
+                + $"lowest row cosine {rows.Min(row => row.Cosine):F4}, "
+                + $"{rows.Sum(row => row.Collapsed)} rows collapsed to zero");
         }
     }
 
@@ -137,12 +153,15 @@ internal static class Validator
         Console.WriteLine($"  quantized: {Preview(actual)}");
     }
 
-    private static (double Error, double Cosine) RowStatistics(
+    private static (double Error, double Cosine, long Collapsed) RowStatistics(
         ReadOnlySpan<float> original, ReadOnlySpan<float> decoded, int rows, int cols)
     {
         double total = 0;
         double energy = 0;
-        double worst = 1;
+
+        double[] dots = new double[rows];
+        double[] sourceNorms = new double[rows];
+        double[] targetNorms = new double[rows];
 
         for (int r = 0; r < rows; r++)
         {
@@ -162,13 +181,15 @@ internal static class Validator
                 normB += (double)b[i] * b[i];
             }
 
-            if (normA > 0 && normB > 0)
-            {
-                worst = Math.Min(worst, dot / Math.Sqrt(normA * normB));
-            }
+            dots[r] = dot;
+            sourceNorms[r] = normA;
+            targetNorms[r] = normB;
         }
 
-        return (energy > 0 ? Math.Sqrt(total / energy) : 0, worst);
+        // The same rule the converter reports under, so the two cannot disagree about the same
+        // file — which they did, and resolving it is what found the fp16 scale fallback.
+        (double worst, long collapsed) = TernaryQuantizer.WorstCosine(dots, sourceNorms, targetNorms);
+        return (energy > 0 ? Math.Sqrt(total / energy) : 0, worst, collapsed);
     }
 
     private static double Cosine(ReadOnlySpan<float> a, ReadOnlySpan<float> b)

@@ -124,7 +124,9 @@ and distillation pipeline that produces ternary weights in the first place, whic
 are not going to acquire by reading a GGUF.
 
 **The consequence for this project, stated once and plainly:** post-training ternarization of
-PaddleOCR-VL-1.6-0.9B will not land where a QAT'd 27B lands. The model is thirty times smaller, so
+PaddleOCR-VL-1.6-0.9B will not land where a QAT'd 27B lands. This was written as a prediction and
+is now a measurement — see §8, where the first real conversion reads a boarding pass as
+`POOOOO / IOOOOOEEEE…` at 0.00% character accuracy. The model is thirty times smaller, so
 each weight carries more of the function; and OCR fails visibly — a wrong glyph is a wrong glyph,
 where a language model's slightly worse paraphrase is not obviously anything. What we can bring
 without training is the rotation (§1.3), GPTQ-style error compensation against real activations,
@@ -332,3 +334,120 @@ does. L0 and the kernel tests run on synthetic tensors and always run.
   they do in Bonsai. An int8 activation path is a different project with a different error budget.
 - **Training.** See §1.5. If ternary PTQ turns out not to be shippable at 0.9B, the honest next
   step is a distillation run against the bf16 model's own outputs, not a cleverer rounding rule.
+
+## 8. What the first real conversion measured
+
+Everything above §7 was written before the converter had seen the 0.9B checkpoint. This section is
+what happened when it did: `PaddleOCR-VL-1.6` from the model mirror, converted and then compared
+against itself on `general_ocr_002.jpg` — a photographed boarding pass with Chinese and English
+text. One machine, one sitting, model loading excluded.
+
+### The file
+
+| | |
+| --- | --- |
+| source | 1.92 GB, 620 tensors, 958.6 M parameters, bfloat16 throughout |
+| converted | **0.72 GB (2.68x)** in 51.5 s |
+| quantized | 268 tensors, 674.1 M parameters (70.3%) at 1.75 bpw |
+| left alone | 284.5 M parameters (29.7%) — 139 M of 4304-wide vision projections the group does not divide, 106 M of token embedding, 37.7 M of a position table |
+
+2.68x rather than the 9x the bit rate suggests, because the exemptions are most of what is left:
+the 4304-wide projections alone are 14.5% of the model and cannot be packed at all.
+
+### Round-to-nearest, no rotation, no calibration
+
+| level | measurement |
+| --- | --- |
+| L1 per tensor | mean relative error **0.4477**, worst 0.5321 on `lm_head` |
+| L2 vision tower | cosine **0.330**, relative error 1.06 |
+| L3 text | **0.00% character accuracy** |
+| L4 cost | recognition 16.7 s reference, **61.8 s quantized (0.27x)** |
+
+The text is the whole answer:
+
+```
+reference:  www.997788.com 中国收藏热线 ⏎ 登机牌 BOARDING PASS ⏎ 航班 FLIGHT 日期 DATE 舱位 CLASS …
+quantized:  POOOOO ⏎ IOOOOOOOOOOOOOOOOOOOOEEEEOOOEEEOOOOEEEEEEEEEEEEEEEEEEE …
+```
+
+### With the rotation
+
+The only rotation block this model admits is **128**, not Bonsai's 1024: the vision tower is 1152
+and 4608 wide and neither is a multiple of 1024, while every quantized width is a multiple of 128.
+That happens to make the rotation exactly group-wide, which is the case that flattens a group's own
+outlier ratio.
+
+| | RTN | RTN + Hadamard(128) |
+| --- | --- | --- |
+| worst tensor relative error | 0.5321 | **0.4339** |
+| lowest row cosine | 0.1758 | **0.8716** |
+| rows collapsed to zero | many | **0** |
+| vision tower cosine | 0.330 | **0.472** |
+
+A real improvement at every level, and nowhere near enough: a tower output at cosine 0.47 is not a
+slightly degraded tower, and the text does not recover.
+
+### The verdict, and it is not close
+
+Ternary post-training quantization of this checkpoint does not work. That is the outcome §1.5
+predicted for the stated reason — Bonsai's ternary weights come out of quantization-aware training,
+and the file format is a container for weights that are already ternary. Rotation and error
+feedback narrow the gap; they do not cross it at 0.9B on a task where one wrong glyph is a visible
+error.
+
+What the numbers say about where to go next, in order:
+
+1. **Stop at ternary for the whole model.** The per-tensor errors cluster at 0.44, which is what
+   `log₂3` bits buys on weights this dense. A 4-bit band over the same container machinery would
+   land near 0.1 and is the obvious next measurement, since every part of this project except the
+   choice of block layout is indifferent to the bit width.
+2. **Quantize selectively.** The policy mechanism exists for exactly this: the decoder's MLP is
+   where the bandwidth is, and the vision tower is where the error hurts most. A file that is
+   ternary in the decoder and bfloat16 in the tower is a five-minute experiment.
+3. **GPTQ.** Implemented and tested on synthetic tensors, but not yet run against the real model —
+   it needs a calibration corpus, which this environment did not have. It is worth measuring and
+   it will not rescue a 0.44 relative error on its own.
+4. **Distillation**, if ternary at this size is actually the goal. That is a training project, not
+   a quantization one.
+
+### Five defects the real conversion found that the synthetic tests could not
+
+Worth listing, because every one of them was invisible on generated tensors and three of them were
+producing plausible-looking wrong numbers rather than errors:
+
+- **An `f32` exemption upcasts a bfloat16 checkpoint.** The starting policy named `f32` for norms,
+  biases and position embeddings; the checkpoint is bfloat16, so the glob turned 75 MB of
+  `packing_position_embedding` into 151 MB — a fifth of the output file spent widening a tensor
+  this port never reads. Exemptions are now `source`, which keeps whatever the checkpoint holds.
+- **Rank-1 tensors were counted as `n × n`.** The plan reported 1884.3 M parameters against a real
+  958.6 M, and "35.8% quantized" where the truth is 70.3%. Invisible in the file, which takes its
+  shapes from the tensor.
+- **The fp16 scale fallback quantized against a scale the file cannot hold.** When the scale search
+  underflowed fp16, the quantizer fell back to the raw `amax`, so the converter's own report
+  described numbers it had not written. It now rounds the fallback through fp16 and zeroes a group
+  whose scale cannot be represented, which is what the decoder produces anyway.
+- **The worst-row-cosine metric was measuring dead rows.** One vision projection has 135 rows whose
+  largest weight is about 1e-8 against a tensor maximum of 0.33. Ternary cannot preserve a direction
+  there and nothing needs it to, but those rows were setting the headline figure. They are counted
+  separately now.
+- **The validator compared rotated weights against an unrotated source.** A rotated file holds
+  `W Rᵀ`, which has no elementwise relationship to `W`; the comparison reported a relative error of
+  1.35 and negative cosines, which looks exactly like a catastrophic conversion rather than like a
+  comparison made in the wrong basis. It now folds the source the same way.
+
+The first two were found by reading the converter's own output and disbelieving it. The third and
+fifth were found because the converter and the validator disagreed about the same file, which is
+the entire reason to measure the same quantity twice in two places.
+
+### And the performance result is the wrong way round
+
+61.8 s against 16.7 s is not a small miss, and the first cause is identified: `ChoosePanelWidth`
+sized the quantized column panel by its *packed* stride — 0.22 bytes a weight — where what has to
+stay in cache is the *decoded* float32 panel. That made a quantized panel eighteen times wider than
+a bfloat16 one and put its scratch far outside L2. Fixed, and not yet re-measured.
+
+That is unlikely to be the whole of it. This workload is one image: the vision tower dominates, and
+the tower runs `Gemm.RunPanel`, where a decoded panel is reused across every activation row and the
+best quantization can do is break even. The place the bit rate is supposed to pay — a decode step
+reading 721 MB of weights per token — barely features here. Measuring it properly needs
+`parse --profile` on a decode-heavy page, and it needs a model whose decode terminates.

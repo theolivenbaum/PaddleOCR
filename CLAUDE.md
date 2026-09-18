@@ -1090,15 +1090,47 @@ storage in the on-disk dtype and widens it inside the kernel. Quantized storage 
 that type, so the tower, the decoder and the pipeline are untouched. The existing split does the
 rest: `RunPanel` decodes a column panel once and reuses it across every activation row, so prefill
 and the vision tower gain footprint and not time, while `RunNarrow`/`Dot4` — what a decode step
-takes — reads the packed bytes directly, which is where the win is. **Expected, not measured:** a
-token currently re-reads 721 MB of bf16 weights, and at 1.75 bpw that is 79 MB. How much of that
-becomes time depends on unpack throughput rather than on bandwidth, which is the first thing to
-profile once there is a real converted checkpoint to profile.
+takes — reads the packed bytes directly, which is where the win is meant to be.
 
 **One shape does not fit.** A block covers 128 weights along the input axis, and the vision MLP's
-second projection is 4304 wide, which 128 does not divide — 134 M parameters over 27 layers that
-stay bfloat16. The converter reports it rather than failing, and it is the largest single thing a
-future group size or a transposed layout would buy.
+second projection is 4304 wide, which 128 does not divide — 139 M parameters over 28 tensors that
+stay bfloat16, 14.5% of the model. With the token embedding and a position table also exempt, a
+converted checkpoint is 2.68x smaller rather than the 9x the bit rate suggests. That, not the block
+layout, is where a future group size or a transposed layout would pay.
+
+### It does not work at this model size, and here is the measurement
+
+`PaddleOCR-VL-1.6` converted and compared against itself on a photographed boarding pass, one
+machine, one sitting, loading excluded:
+
+| level | round-to-nearest | + Hadamard(128) |
+| --- | --- | --- |
+| per-tensor relative error, worst | 0.5321 (`lm_head`) | 0.4339 |
+| lowest row cosine | 0.1758 | 0.8716 |
+| vision tower output cosine | 0.330 | 0.472 |
+| character accuracy | **0.00%** | — |
+| recognition | 16.7 s bf16 → 61.8 s quantized | — |
+
+The reference reads `www.997788.com 中国收藏热线 / 登机牌 BOARDING PASS / 航班 FLIGHT …`; the
+quantized model reads `POOOOO / IOOOOOOOEEEEOOOEEE…`. The rotation is a real improvement at every
+level and does not come close to crossing the gap.
+
+This is the outcome the design predicted, for the reason it gave: the fork's encoders are
+containers for weights that are *already* ternary, and Bonsai's are ternary because of
+quantization-aware training. Rotation and error feedback narrow a post-training gap; they do not
+close this one at 0.9B on a task where one wrong glyph is a visible error. `docs/ternary.md` §8 has
+the full account, the five defects the real conversion found that synthetic tensors could not, and
+what to measure next — a 4-bit band over the same machinery, and a policy that is ternary in the
+decoder and bfloat16 in the tower, are both cheap experiments the policy mechanism already
+supports.
+
+**And the cost went the wrong way.** 61.8 s against 16.7 s. One cause is found and fixed —
+`ChoosePanelWidth` sized the quantized panel by its packed stride where what must fit in cache is
+the decoded float32 panel, making it eighteen times too wide — but this workload is one image, so
+the vision tower dominates and the tower's panel kernel is precisely where quantization can only
+break even. The bit rate is supposed to pay in a decode step, which barely features here. Nothing
+about the decode win has been measured yet, and the earlier version of this section stated it as an
+expectation; it is still an expectation.
 
 **Precision is per tensor, decided by measurement.** Bonsai 2 keeps a named handful of tensors at
 full precision for 0.0976% of its parameters; the lesson is the shape of that decision rather than

@@ -299,17 +299,36 @@ Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigate
 - [x] `tools/PaddleOcrSharp.Quantize`: `convert`, `validate`, `inspect`, `policy`.
 - [x] Tests: golden vectors, container round-trips, rotation against the explicit matrix, the
       quantized kernels against their dequantized reference, GPTQ against round-to-nearest.
-- [ ] **Convert a real checkpoint and measure it.** Everything above is exercised on synthetic
-      tensors; nothing here has seen the 0.9B weights. The four levels in `docs/ternary.md` are
-      what decides whether ternary is shippable at this model size, and the honest expectation is
-      that some tensors will have to move up a band.
-- [ ] Profile the decode step against the bf16 build. The traffic falls from 721 MB a token to 79,
-      but the unpack is then the candidate bound, and a fused decode-and-multiply kernel is the
-      answer if it is.
-- [ ] The vision MLP's 4304-wide projection cannot be packed at group 128 — 134 M parameters that
-      stay bfloat16. A narrower group or a transposed layout is the only way to reach it.
+- [x] **Converted the real checkpoint and measured it.** 1.92 GB -> 0.72 GB (2.68x) in 51.5 s,
+      70.3% of parameters at 1.75 bpw. It does not work: 0.00% character accuracy, vision tower
+      cosine 0.330, and the boarding pass comes back as `POOOOO / IOOOOEEEE...`. With the rotation
+      (block 128, the only one this model's widths admit) the tensor numbers improve a lot — worst
+      error 0.53 -> 0.43, lowest row cosine 0.18 -> 0.87, no collapsed rows — and the tower reaches
+      only 0.472. `docs/ternary.md` §8 is the full account.
+- [x] Five defects the real conversion found and synthetic tensors could not: an `f32` exemption
+      upcasting a bfloat16 checkpoint (75 -> 151 MB on a tensor the port never reads), rank-1
+      tensors counted as `n x n` (1884 M against a real 959 M), an fp16 scale fallback that
+      quantized against a scale the file cannot hold, a worst-row-cosine metric dominated by rows
+      whose weights are 1e-8, and a validator comparing rotated weights against an unrotated
+      source. All fixed; the last two were found only because two implementations disagreed about
+      the same file.
+- [ ] **Measure a 4-bit band.** The per-tensor errors cluster at 0.44, which is what `log₂3` bits
+      buys on weights this dense. Everything here except the choice of block layout is indifferent
+      to bit width, so this is the cheapest experiment with a chance of shipping.
+- [ ] **Measure a split policy** — ternary in the decoder, bfloat16 in the vision tower. The
+      bandwidth is in the decoder and the error hurts most in the tower; the policy mechanism
+      already expresses it.
+- [ ] Run GPTQ against the real model. Implemented and tested on synthetic tensors, never run on
+      the checkpoint: it needs a calibration corpus, which this environment did not have.
+- [ ] Re-measure cost after the panel-width fix. Quantized recognition was **0.27x** — slower, not
+      faster — and `ChoosePanelWidth` sizing the panel by its packed stride is one identified
+      cause but probably not the whole of it. A decode-heavy page under `parse --profile` is what
+      would actually test the premise, and it needs a model whose decode terminates.
+- [ ] The vision MLP's 4304-wide projection cannot be packed at group 128 — 139 M parameters,
+      14.5% of the model, that stay bfloat16. A narrower group or a transposed layout is the only
+      way to reach it, and it is most of why 1.75 bpw yields 2.68x rather than 9x.
 - [ ] Hoist the activation rotation: `q`/`k`/`v` each rotate the same normed activation, which the
-      fork memoizes. Worth doing when a profile asks for it.
+      fork memoizes. The rotated model was markedly slower still, so this now has a reason.
 
 ## Closing the layout gap against upstream
 

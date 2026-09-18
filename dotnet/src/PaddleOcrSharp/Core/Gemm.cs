@@ -95,7 +95,7 @@ public static class Gemm
         // the same slice of the weight matrix for every activation row, so the panel stays in
         // cache. Splitting along rows would make every thread stream the whole weight matrix once
         // per row, which for a 1152x4304 projection is 10 MB of traffic per token.
-        int panel = ChoosePanelWidth(cols, weight);
+        int panel = ChoosePanelWidth(inner, cols, weight);
         int panels = (cols + panel - 1) / panel;
 
         RunPanelsInParallel(panels, panel, x, rows, inner, weight, bias, y, cols);
@@ -141,7 +141,7 @@ public static class Gemm
             return;
         }
 
-        int panel = ChoosePanelWidth(cols, weight);
+        int panel = ChoosePanelWidth(inner, cols, weight);
         int panels = (cols + panel - 1) / panel;
         RunPanelsInParallel(panels, panel, rotated.Memory, rows, inner, weight, bias, y, cols);
     }
@@ -181,13 +181,18 @@ public static class Gemm
     /// multiple of four that the tail costs nothing. Rounding the count up rather than the width
     /// down keeps every panel inside L2 and gives each worker the same number of them.
     /// </remarks>
-    private static int ChoosePanelWidth(int cols, WeightMatrix weight)
+    private static int ChoosePanelWidth(int inner, int cols, WeightMatrix weight)
     {
         const int TargetPanelBytes = 256 * 1024;
 
-        // A quantized row is a fraction of a byte per weight, so its own stride is what decides
-        // how many columns fit the target rather than the element size of a dtype it has not got.
-        int rowBytes = Math.Max(1, weight.RowByteLength);
+        // What has to stay in cache is the panel the kernel sweeps, which is the *decoded* float32
+        // panel, not the bytes it was read from. Sizing a quantized panel by its packed stride —
+        // 0.22 bytes a weight at 1.75 bpw — makes it eighteen times wider than a bfloat16 one and
+        // puts its scratch far outside L2. Quantized storage is therefore sized as bfloat16 is, so
+        // the decoded panel is the same size either way and the float paths are untouched.
+        int rowBytes = weight.IsQuantized
+            ? Math.Max(1, inner * 2)
+            : Math.Max(1, weight.RowByteLength);
         int panel = Math.Max(ColBlock, TargetPanelBytes / rowBytes);
         panel = (panel + ColBlock - 1) / ColBlock * ColBlock;
 

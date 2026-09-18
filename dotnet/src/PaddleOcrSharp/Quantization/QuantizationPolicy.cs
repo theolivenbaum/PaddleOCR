@@ -9,7 +9,8 @@ namespace PaddleOcrSharp.Quantization;
 /// A glob over the tensor name; <c>*</c> matches any run of characters and <c>?</c> one character.
 /// </param>
 /// <param name="Scheme">
-/// What to store a matching tensor as: <c>ptq1_0</c>, <c>pq2_0</c>, <c>bf16</c> or <c>f32</c>.
+/// What to store a matching tensor as: <c>ptq1_0</c>, <c>pq2_0</c>, <c>bf16</c>, <c>f32</c>, or
+/// <c>source</c> to keep whatever dtype the checkpoint already holds.
 /// </param>
 /// <param name="Rotate">
 /// Whether a matching tensor is folded into the rotated basis; defaults to whether it is quantized.
@@ -54,26 +55,46 @@ public sealed class QuantizationPolicy
     /// its bandwidth, and float everywhere a matrix product is not what happens.
     /// </summary>
     /// <remarks>
-    /// The four exemptions are not guesses about sensitivity, they are places where quantizing
-    /// would be the wrong operation. Norms and biases are kilobytes read once per row. The token
-    /// embedding is a gather, so a packed row would have to be decoded per token for no bandwidth
-    /// saved. The position embedding is bilinearly interpolated at run time, on values whose
-    /// differences are the signal. The patch embedding is one product per page. <c>lm_head</c> is
-    /// none of those — 106 M parameters re-read on every generated token — so it is quantized, and
-    /// it is the first tensor the per-stage validation should look at, because its error lands
-    /// directly on an argmax.
+    /// <para>
+    /// Norms, biases and the position embedding are exempt because quantizing them would be the
+    /// wrong operation rather than a risky one: the first two are kilobytes read once per row, and
+    /// the third is bilinearly interpolated at run time on values whose <i>differences</i> are the
+    /// signal. The patch embedding is one product per page.
+    /// </para>
+    /// <para>
+    /// They are exempted as <c>source</c> and not as <c>f32</c>, which is not a detail. The
+    /// checkpoint is bfloat16 throughout, so naming a float width here can only <i>upcast</i>, and
+    /// the first conversion of the real model did exactly that: <c>packing_position_embedding</c>
+    /// is [32768, 1152], the glob caught it, and 75 MB of bfloat16 became 151 MB of float32 — a
+    /// fifth of the output file spent widening a tensor this port does not even read. An exemption
+    /// should cost what the tensor already costs.
+    /// </para>
+    /// <para>
+    /// The token embedding is a different case and is exempt only provisionally. Bonsai quantizes
+    /// embeddings along with everything else, and the obvious objection — that a gather would have
+    /// to decode a packed row per token — does not survive arithmetic: a row is 1024 weights, which
+    /// is eight blocks, against the 255 M parameters the same token costs in the decoder. So the
+    /// reason to leave it at bfloat16 is a suspicion about quality at 0.9B and not a cost, which
+    /// makes it exactly the kind of claim the validation ladder exists to settle. It is 212 MB of a
+    /// converted file, so settling it is worth doing.
+    /// </para>
+    /// <para>
+    /// <c>lm_head</c> is none of those — 106 M parameters re-read on every generated token — so it
+    /// is quantized, and it is the first tensor the per-stage validation should look at, because
+    /// its error lands directly on an argmax.
+    /// </para>
     /// </remarks>
     public static QuantizationPolicy Recommended { get; } = new()
     {
         DefaultScheme = "ptq1_0",
         Rules =
         [
-            new QuantizationRule("*norm*", "f32"),
-            new QuantizationRule("*layer_norm*", "f32"),
-            new QuantizationRule("*.bias", "f32"),
-            new QuantizationRule("*embed_tokens*", "bf16"),
-            new QuantizationRule("*position_embedding*", "f32"),
-            new QuantizationRule("*patch_embedding*", "bf16"),
+            new QuantizationRule("*norm*", "source"),
+            new QuantizationRule("*layer_norm*", "source"),
+            new QuantizationRule("*.bias", "source"),
+            new QuantizationRule("*embed_tokens*", "source"),
+            new QuantizationRule("*position_embedding*", "source"),
+            new QuantizationRule("*patch_embedding*", "source"),
         ],
         Rotation = new RotationPolicy(BlockSize: 0),
     };
@@ -97,7 +118,12 @@ public sealed class QuantizationPolicy
 
     /// <summary>The stored type for <paramref name="name"/>.</summary>
     /// <param name="name">Tensor name.</param>
-    public GgmlType SchemeFor(string name) => Parse(RuleFor(name)?.Scheme ?? DefaultScheme, name);
+    /// <param name="source">
+    /// The dtype the checkpoint holds the tensor in, which is what the <c>source</c> scheme
+    /// resolves to.
+    /// </param>
+    public GgmlType SchemeFor(string name, GgmlType source = GgmlType.BF16) =>
+        Parse(RuleFor(name)?.Scheme ?? DefaultScheme, name, source);
 
     /// <summary>Whether <paramref name="name"/> is folded into the rotated basis.</summary>
     /// <param name="name">Tensor name.</param>
@@ -148,12 +174,13 @@ public sealed class QuantizationPolicy
         return null;
     }
 
-    private static GgmlType Parse(string scheme, string name) => scheme.ToLowerInvariant() switch
+    private static GgmlType Parse(string scheme, string name, GgmlType source) => scheme.ToLowerInvariant() switch
     {
         "ptq1_0" or "ptq1" => GgmlType.PTQ1_0,
         "pq2_0" or "pq2" => GgmlType.PQ2_0,
         "bf16" => GgmlType.BF16,
         "f32" or "fp32" => GgmlType.F32,
+        "source" or "keep" => source,
         _ => throw new InvalidDataException($"Unknown scheme '{scheme}' for '{name}'."),
     };
 

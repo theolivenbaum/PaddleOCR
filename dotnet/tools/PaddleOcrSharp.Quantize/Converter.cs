@@ -13,6 +13,7 @@ internal sealed record ConversionPlanEntry(
     long[] Ne,
     int Rows,
     int Cols,
+    long Parameters,
     bool Rotate,
     string? Note);
 
@@ -131,7 +132,9 @@ internal static class Converter
                 Console.WriteLine(
                     $"  {entry.Name,-58} {report.Scheme.TypeName(),-7} "
                     + $"err {report.RelativeError,6:F4}  worst cos {report.WorstRowCosine,6:F4}  "
-                    + $"zeros {report.ZeroFraction,5:P0}{(hessian is null ? string.Empty : "  gptq")}");
+                    + $"zeros {report.ZeroFraction,5:P0}"
+                    + $"{(report.CollapsedRows > 0 ? $"  {report.CollapsedRows} collapsed" : string.Empty)}"
+                    + $"{(hessian is null ? string.Empty : "  gptq")}");
             }
 
             writer.Complete();
@@ -153,7 +156,8 @@ internal static class Converter
                 + $"{reports.MaxBy(report => report.RelativeError).Name}");
             Console.WriteLine(
                 $"lowest row cosine {reports.Min(report => report.WorstRowCosine):F4} on "
-                + $"{reports.MinBy(report => report.WorstRowCosine).Name}");
+                + $"{reports.MinBy(report => report.WorstRowCosine).Name}; "
+                + $"{reports.Sum(report => report.CollapsedRows)} rows collapsed to zero");
         }
 
         if (settings.ReportPath is not null)
@@ -183,10 +187,13 @@ internal static class Converter
         foreach (string name in source.Names.Order(StringComparer.Ordinal))
         {
             WeightTensor tensor = source[name];
-            GgmlType requested = policy.SchemeFor(name);
+            GgmlType requested = policy.SchemeFor(name, SourceType(tensor.Dtype));
 
-            int rows = tensor.Shape[0];
-            int cols = tensor.Shape.Length > 1 ? tensor.ElementCount / rows : tensor.ElementCount;
+            // A rank-1 tensor is one column, not an n x n matrix. Reading its element count as
+            // both dimensions squares it, which is invisible in the file — `ne` comes from the
+            // shape — and silently wrong in every count that uses rows x cols.
+            int rows = tensor.Shape.Length > 1 ? tensor.Shape[0] : tensor.ElementCount;
+            int cols = tensor.Shape.Length > 1 ? tensor.ElementCount / rows : 1;
             string? note = null;
             GgmlType type = requested;
 
@@ -217,7 +224,7 @@ internal static class Converter
                 note = $"{cols} inputs is not a multiple of the {policy.Rotation.BlockSize}-wide rotation";
             }
 
-            plan.Add(new ConversionPlanEntry(name, type, ne, rows, cols, rotate, note));
+            plan.Add(new ConversionPlanEntry(name, type, ne, rows, cols, tensor.ElementCount, rotate, note));
         }
 
         return plan;
@@ -231,7 +238,7 @@ internal static class Converter
 
         foreach (ConversionPlanEntry entry in plan)
         {
-            long parameters = (long)entry.Rows * entry.Cols;
+            long parameters = entry.Parameters;
             totalParameters += parameters;
             byType[entry.Type] = byType.GetValueOrDefault(entry.Type) + parameters;
             if (entry.Type.IsQuantized())
@@ -259,9 +266,18 @@ internal static class Converter
 
     private static GgmlType DominantType(List<ConversionPlanEntry> plan) =>
         plan.GroupBy(entry => entry.Type)
-            .OrderByDescending(group => group.Sum(entry => (long)entry.Rows * entry.Cols))
+            .OrderByDescending(group => group.Sum(entry => entry.Parameters))
             .First()
             .Key;
+
+    /// <summary>The ggml type a source dtype maps onto, for the <c>source</c> scheme.</summary>
+    private static GgmlType SourceType(DType dtype) => dtype switch
+    {
+        DType.Float32 => GgmlType.F32,
+        DType.Float16 => GgmlType.F32,
+        DType.BFloat16 => GgmlType.BF16,
+        _ => GgmlType.F32,
+    };
 
     private static byte[] Unquantized(WeightTensor tensor, GgmlType type)
     {

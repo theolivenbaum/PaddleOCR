@@ -32,9 +32,15 @@ public class QuantizedCheckpointTests : IDisposable
         // whose quantization the whole decode win rests on.
         Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("lm_head.weight"));
         Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("model.layers.4.self_attn.q_proj.weight"));
-        Assert.Equal(GgmlType.F32, policy.SchemeFor("model.layers.4.input_layernorm.weight"));
-        Assert.Equal(GgmlType.F32, policy.SchemeFor("vision_model.encoder.layers.0.mlp.fc1.bias"));
-        Assert.Equal(GgmlType.BF16, policy.SchemeFor("model.embed_tokens.weight"));
+        // The exemptions keep the checkpoint's own dtype rather than naming a float width.
+        // Naming one can only upcast a bfloat16 checkpoint, which on the real model turned 75 MB
+        // of position embedding into 151 MB for nothing.
+        Assert.Equal(GgmlType.BF16, policy.SchemeFor("model.layers.4.input_layernorm.weight", GgmlType.BF16));
+        Assert.Equal(GgmlType.BF16, policy.SchemeFor("vision_model.encoder.layers.0.mlp.fc1.bias", GgmlType.BF16));
+        Assert.Equal(GgmlType.BF16, policy.SchemeFor("model.embed_tokens.weight", GgmlType.BF16));
+        Assert.Equal(
+            GgmlType.F32,
+            policy.SchemeFor("visual.vision_model.embeddings.packing_position_embedding.weight", GgmlType.F32));
     }
 
     [Fact]
