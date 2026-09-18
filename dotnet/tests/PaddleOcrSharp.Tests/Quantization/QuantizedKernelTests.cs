@@ -16,11 +16,23 @@ namespace PaddleOcrSharp.Tests.Quantization;
 /// </remarks>
 public class QuantizedKernelTests
 {
+    // One row takes the fused decode path and four or more take the panel path, and the two had
+    // different ideas about how wide a block is: the panel path decodes whole rows and so never
+    // saw it, while the single-row path assumed the ternary group of 128 and overran a 32-weight
+    // integer block. Every band is checked through both.
     [Theory]
     [InlineData(GgmlType.PQ2_0, 1)]
     [InlineData(GgmlType.PQ2_0, 7)]
     [InlineData(GgmlType.PTQ1_0, 1)]
     [InlineData(GgmlType.PTQ1_0, 7)]
+    [InlineData(GgmlType.Q4_0, 1)]
+    [InlineData(GgmlType.Q4_0, 7)]
+    [InlineData(GgmlType.Q4_1, 1)]
+    [InlineData(GgmlType.Q4_1, 7)]
+    [InlineData(GgmlType.Q5_1, 1)]
+    [InlineData(GgmlType.Q5_1, 7)]
+    [InlineData(GgmlType.Q8_0, 1)]
+    [InlineData(GgmlType.Q8_0, 7)]
     public void TheProductMatchesTheDequantizedWeight(GgmlType type, int rows)
     {
         const int Cols = 256;
@@ -52,6 +64,10 @@ public class QuantizedKernelTests
     [Theory]
     [InlineData(GgmlType.PQ2_0)]
     [InlineData(GgmlType.PTQ1_0)]
+    [InlineData(GgmlType.Q4_0)]
+    [InlineData(GgmlType.Q4_1)]
+    [InlineData(GgmlType.Q5_1)]
+    [InlineData(GgmlType.Q8_0)]
     public void WideningARowGivesTheSameValuesAsWideningThePanel(GgmlType type)
     {
         const int Cols = 64;
@@ -163,8 +179,8 @@ public class QuantizedKernelTests
 
         for (int r = 0; r < rows; r++)
         {
-            TernaryBlocks.Encode(type, source.AsSpan(r * cols, cols), packed.AsSpan(r * rowBytes, rowBytes));
-            TernaryBlocks.Decode(type, packed.AsSpan(r * rowBytes, rowBytes), dequantized.AsSpan(r * cols, cols));
+            BlockCodec.Encode(type, source.AsSpan(r * cols, cols), packed.AsSpan(r * rowBytes, rowBytes));
+            BlockCodec.Decode(type, packed.AsSpan(r * rowBytes, rowBytes), dequantized.AsSpan(r * cols, cols));
         }
 
         return (packed, dequantized);

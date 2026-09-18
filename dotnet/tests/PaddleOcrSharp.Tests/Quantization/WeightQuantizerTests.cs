@@ -4,7 +4,7 @@ using PaddleOcrSharp.Quantization;
 namespace PaddleOcrSharp.Tests.Quantization;
 
 /// <summary>The part of the pipeline that decides the trits, rather than the one that packs them.</summary>
-public class TernaryQuantizerTests
+public class WeightQuantizerTests
 {
     [Theory]
     [InlineData(GgmlType.PQ2_0)]
@@ -30,7 +30,7 @@ public class TernaryQuantizerTests
         float[] original = (float[])weights.Clone();
         byte[] packed = new byte[type.RowSize(Cols) * Rows];
 
-        TensorQuantizationReport report = TernaryQuantizer.Quantize(
+        TensorQuantizationReport report = WeightQuantizer.Quantize(
             "test", weights, Rows, Cols, new QuantizationOptions(type), rotation: null, hessian: null, packed);
 
         float[] decoded = new float[weights.Length];
@@ -140,7 +140,7 @@ public class TernaryQuantizerTests
 
     [Fact]
     public void AnInputWidthTheGroupDoesNotDivideIsRefused() =>
-        Assert.Throws<ArgumentException>(() => TernaryQuantizer.Quantize(
+        Assert.Throws<ArgumentException>(() => WeightQuantizer.Quantize(
             "bad", new float[200], 1, 200, new QuantizationOptions(), null, null, new byte[256]));
 
     private static double Convert(
@@ -148,7 +148,7 @@ public class TernaryQuantizerTests
     {
         float[] weights = (float[])source.Clone();
         byte[] packed = new byte[options.Scheme.RowSize(cols) * rows];
-        return TernaryQuantizer
+        return WeightQuantizer
             .Quantize("test", weights, rows, cols, options, rotation: null, hessian, packed)
             .RelativeError;
     }
@@ -160,7 +160,7 @@ public class TernaryQuantizerTests
         float[] weights = (float[])source.Clone();
         var options = new QuantizationOptions();
         byte[] packed = new byte[options.Scheme.RowSize(cols) * rows];
-        TernaryQuantizer.Quantize("test", weights, rows, cols, options, rotation: null, hessian, packed);
+        WeightQuantizer.Quantize("test", weights, rows, cols, options, rotation: null, hessian, packed);
 
         float[] decoded = new float[source.Length];
         TernaryBlocks.Decode(options.Scheme, packed, decoded);

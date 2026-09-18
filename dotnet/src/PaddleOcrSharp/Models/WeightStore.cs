@@ -173,7 +173,7 @@ public sealed class WeightStore : IDisposable
 
         if (tensor.Type.IsQuantized())
         {
-            TernaryBlocks.Decode(tensor.Type, tensor.Bytes.Span, result);
+            BlockCodec.Decode(tensor.Type, tensor.Bytes.Span, result);
             return result;
         }
 

@@ -22,6 +22,30 @@ public enum GgmlType
     /// <summary>IEEE-754 binary16. <c>GGML_TYPE_F16</c>.</summary>
     F16 = 1,
 
+    /// <summary>
+    /// Symmetric 4-bit, 32 weights per block, one fp16 scale. 18 bytes, 4.5 bpw.
+    /// <c>GGML_TYPE_Q4_0</c>.
+    /// </summary>
+    Q4_0 = 2,
+
+    /// <summary>
+    /// Asymmetric 4-bit, 32 weights per block, an fp16 scale and an fp16 minimum. 20 bytes,
+    /// 5.0 bpw. <c>GGML_TYPE_Q4_1</c>.
+    /// </summary>
+    Q4_1 = 3,
+
+    /// <summary>
+    /// Asymmetric 5-bit, 32 weights per block, scale, minimum and a plane of fifth bits.
+    /// 24 bytes, 6.0 bpw. <c>GGML_TYPE_Q5_1</c>.
+    /// </summary>
+    Q5_1 = 7,
+
+    /// <summary>
+    /// Symmetric 8-bit, 32 weights per block, one fp16 scale. 34 bytes, 8.5 bpw.
+    /// <c>GGML_TYPE_Q8_0</c>.
+    /// </summary>
+    Q8_0 = 8,
+
     /// <summary>Signed 32-bit integer. <c>GGML_TYPE_I32</c>.</summary>
     I32 = 26,
 
@@ -50,6 +74,7 @@ public static class GgmlTypeExtensions
     public static int BlockSize(this GgmlType type) => type switch
     {
         GgmlType.F32 or GgmlType.F16 or GgmlType.I32 or GgmlType.BF16 => 1,
+        GgmlType.Q4_0 or GgmlType.Q4_1 or GgmlType.Q5_1 or GgmlType.Q8_0 => IntegerBlockGeometry.GroupSize,
         GgmlType.PQ2_0 => TernaryBlockGeometry.GroupSize,
         GgmlType.PTQ1_0 => TernaryBlockGeometry.GroupSize,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown ggml type."),
@@ -60,6 +85,10 @@ public static class GgmlTypeExtensions
     {
         GgmlType.F32 or GgmlType.I32 => 4,
         GgmlType.F16 or GgmlType.BF16 => 2,
+        GgmlType.Q4_0 => IntegerBlockGeometry.Q40BlockBytes,
+        GgmlType.Q4_1 => IntegerBlockGeometry.Q41BlockBytes,
+        GgmlType.Q5_1 => IntegerBlockGeometry.Q51BlockBytes,
+        GgmlType.Q8_0 => IntegerBlockGeometry.Q80BlockBytes,
         GgmlType.PQ2_0 => TernaryBlockGeometry.Pq20BlockBytes,
         GgmlType.PTQ1_0 => TernaryBlockGeometry.Ptq10BlockBytes,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown ggml type."),
@@ -67,7 +96,11 @@ public static class GgmlTypeExtensions
 
     /// <summary>Whether the type stores blocks of quantized codes rather than plain elements.</summary>
     public static bool IsQuantized(this GgmlType type) =>
-        type is GgmlType.PQ2_0 or GgmlType.PTQ1_0;
+        type is GgmlType.PQ2_0 or GgmlType.PTQ1_0
+            or GgmlType.Q4_0 or GgmlType.Q4_1 or GgmlType.Q5_1 or GgmlType.Q8_0;
+
+    /// <summary>Whether the type's codes are ternary, as opposed to a wider integer grid.</summary>
+    public static bool IsTernary(this GgmlType type) => type is GgmlType.PQ2_0 or GgmlType.PTQ1_0;
 
     /// <summary>The name ggml prints for the type, which is also what a GGUF dumper shows.</summary>
     public static string TypeName(this GgmlType type) => type switch
@@ -76,6 +109,10 @@ public static class GgmlTypeExtensions
         GgmlType.F16 => "f16",
         GgmlType.I32 => "i32",
         GgmlType.BF16 => "bf16",
+        GgmlType.Q4_0 => "q4_0",
+        GgmlType.Q4_1 => "q4_1",
+        GgmlType.Q5_1 => "q5_1",
+        GgmlType.Q8_0 => "q8_0",
         GgmlType.PQ2_0 => "pq2_0",
         GgmlType.PTQ1_0 => "ptq1_0",
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown ggml type."),

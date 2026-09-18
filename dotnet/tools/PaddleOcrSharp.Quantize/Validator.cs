@@ -69,7 +69,7 @@ internal static class Validator
             // checkpoint is 3.8 GB of float32 held for the length of the comparison.
             float[] original = source.Tensor(name).ToFloats();
             float[] decoded = new float[stored.ElementCount];
-            TernaryBlocks.Decode(stored.Type, stored.Bytes.Span, decoded);
+            BlockCodec.Decode(stored.Type, stored.Bytes.Span, decoded);
 
             int cols = checked((int)stored.RowLength);
             int count = checked((int)stored.RowCount);
@@ -188,7 +188,7 @@ internal static class Validator
 
         // The same rule the converter reports under, so the two cannot disagree about the same
         // file — which they did, and resolving it is what found the fp16 scale fallback.
-        (double worst, long collapsed) = TernaryQuantizer.WorstCosine(dots, sourceNorms, targetNorms);
+        (double worst, long collapsed) = WeightQuantizer.WorstCosine(dots, sourceNorms, targetNorms);
         return (energy > 0 ? Math.Sqrt(total / energy) : 0, worst, collapsed);
     }
 

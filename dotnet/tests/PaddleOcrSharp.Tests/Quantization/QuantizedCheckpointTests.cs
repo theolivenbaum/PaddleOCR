@@ -37,10 +37,16 @@ public class QuantizedCheckpointTests : IDisposable
         // of position embedding into 151 MB for nothing.
         Assert.Equal(GgmlType.BF16, policy.SchemeFor("model.layers.4.input_layernorm.weight", GgmlType.BF16));
         Assert.Equal(GgmlType.BF16, policy.SchemeFor("vision_model.encoder.layers.0.mlp.fc1.bias", GgmlType.BF16));
-        Assert.Equal(GgmlType.BF16, policy.SchemeFor("model.embed_tokens.weight", GgmlType.BF16));
+
+        // The embedding and the unused packing table are quantized; the small interpolated
+        // position grid, which the glob would otherwise catch, is not.
+        Assert.Equal(GgmlType.PTQ1_0, policy.SchemeFor("model.embed_tokens.weight", GgmlType.BF16));
         Assert.Equal(
-            GgmlType.F32,
-            policy.SchemeFor("visual.vision_model.embeddings.packing_position_embedding.weight", GgmlType.F32));
+            GgmlType.PTQ1_0,
+            policy.SchemeFor("visual.vision_model.embeddings.packing_position_embedding.weight", GgmlType.BF16));
+        Assert.Equal(
+            GgmlType.BF16,
+            policy.SchemeFor("visual.vision_model.embeddings.position_embedding.weight", GgmlType.BF16));
     }
 
     [Fact]

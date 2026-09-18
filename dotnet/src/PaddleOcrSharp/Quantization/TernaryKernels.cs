@@ -79,7 +79,10 @@ internal static class TernaryKernels
                 break;
 
             default:
-                throw new ArgumentOutOfRangeException(nameof(type), type, "Not a ternary block type.");
+                // The integer bands have no vectorised path yet; correctness first, and the
+                // reference decoders are simple enough that adding one is a later, measured step.
+                BlockCodec.Decode(type, packed, destination);
+                break;
         }
     }
 

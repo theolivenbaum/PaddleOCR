@@ -56,7 +56,7 @@ public static class TernaryBlockGeometry
 /// These are container operations, not a quantizer. Both encoders take the group's scale as
 /// <c>amax</c> and round, which is exact when the input is already ternary at this group size and
 /// is merely round-to-nearest when it is not. Choosing the trits is
-/// <see cref="Quantization.TernaryQuantizer"/>'s job; this type only lays them out.
+/// <see cref="Quantization.WeightQuantizer"/>'s job; this type only lays them out.
 /// </para>
 /// <para>
 /// Two details decide whether a transcription of the C is right. The C rounds with

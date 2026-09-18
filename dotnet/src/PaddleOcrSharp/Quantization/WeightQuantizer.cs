@@ -68,7 +68,8 @@ public readonly record struct TensorQuantizationReport(
 }
 
 /// <summary>
-/// Turns a float weight matrix into ternary codes and packs it.
+/// Turns a float weight matrix into quantized codes and packs it, at whichever band the policy
+/// asked for.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -108,7 +109,7 @@ public readonly record struct TensorQuantizationReport(
 /// </item>
 /// </list>
 /// </remarks>
-public static class TernaryQuantizer
+public static class WeightQuantizer
 {
     /// <summary>
     /// Quantizes and packs <paramref name="weights"/>.
@@ -142,7 +143,8 @@ public static class TernaryQuantizer
         if (cols % group != 0)
         {
             throw new ArgumentException(
-                $"'{name}' has {cols} input features, which is not a multiple of the {group}-weight group.",
+                $"'{name}' has {cols} input features, which is not a multiple of {options.Scheme.TypeName()}'s "
+                + $"{group}-weight group.",
                 nameof(cols));
         }
 
@@ -154,24 +156,41 @@ public static class TernaryQuantizer
         using PooledBuffer original = TensorPool.Rent(rows * cols);
         weights[..(rows * cols)].CopyTo(original.Span);
 
-        if (hessian is not null)
+        // Ternary is the band where the choice of codes is a real optimisation problem, because
+        // `log₂3` bits leave nothing to spare. The integer bands are an ordinary rounding problem
+        // that ggml's reference encoders already solve, so they are handed the weights untouched.
+        if (options.Scheme.IsTernary())
         {
-            QuantizeWithFeedback(weights, rows, cols, options, hessian);
-        }
-        else
-        {
-            QuantizeRowwise(weights, rows, cols, options);
+            if (hessian is not null)
+            {
+                QuantizeWithFeedback(weights, rows, cols, options, hessian);
+            }
+            else
+            {
+                QuantizeRowwise(weights, rows, cols, options);
+            }
         }
 
-        // `weights` now holds the dequantized values; packing them is exact, because every group
-        // is already ternary at this group size and `amax` recovers the scale it was built from.
         int rowBytes = checked((int)options.Scheme.RowSize(cols));
         for (int r = 0; r < rows; r++)
         {
-            TernaryBlocks.Encode(
+            BlockCodec.Encode(
                 options.Scheme,
                 weights.Slice(r * cols, cols),
                 packed.Slice(r * rowBytes, rowBytes));
+        }
+
+        // Read the file back before measuring it. Every earlier version computed the report from
+        // the values it had in hand and assumed packing was exact; that assumption held for three
+        // bands and quietly failed for the fourth, on groups whose scale underflows fp16. Decoding
+        // what was actually written makes the report describe the file by construction rather than
+        // by argument, for every band including ones added later.
+        for (int r = 0; r < rows; r++)
+        {
+            BlockCodec.Decode(
+                options.Scheme,
+                packed.Slice(r * rowBytes, rowBytes),
+                weights.Slice(r * cols, cols));
         }
 
         return Measure(name, options.Scheme, original.Span, weights, rows, cols, rotation is not null, (long)rows * rowBytes);

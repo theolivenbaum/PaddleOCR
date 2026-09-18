@@ -180,8 +180,8 @@ public readonly struct WeightMatrix
     {
         if (IsQuantized)
         {
-            Span<float> decoded = stackalloc float[TernaryBlockGeometry.GroupSize];
-            return DotQuantized(x, row, decoded);
+            using PooledBuffer scratch = TensorPool.Rent(Cols);
+            return DotQuantized(x, row, scratch.Span);
         }
 
         if (Dtype == DType.Float32)
@@ -204,11 +204,11 @@ public readonly struct WeightMatrix
     {
         if (IsQuantized)
         {
-            Span<float> decoded = stackalloc float[TernaryBlockGeometry.GroupSize];
-            a0 = DotQuantized(x, row, decoded);
-            a1 = DotQuantized(x, row + 1, decoded);
-            a2 = DotQuantized(x, row + 2, decoded);
-            a3 = DotQuantized(x, row + 3, decoded);
+            using PooledBuffer scratch = TensorPool.Rent(Cols);
+            a0 = DotQuantized(x, row, scratch.Span);
+            a1 = DotQuantized(x, row + 1, scratch.Span);
+            a2 = DotQuantized(x, row + 2, scratch.Span);
+            a3 = DotQuantized(x, row + 3, scratch.Span);
             return;
         }
 
@@ -313,26 +313,25 @@ public readonly struct WeightMatrix
     /// </summary>
     /// <param name="x">Activation row.</param>
     /// <param name="row">Weight row index.</param>
-    /// <param name="scratch">A 128-float buffer, reused across blocks and rows.</param>
+    /// <param name="scratch">A buffer of at least <see cref="Cols"/> floats, reused across rows.</param>
     /// <remarks>
-    /// The block is decoded into <paramref name="scratch"/> and consumed immediately, so it never
-    /// leaves L1; what crosses the memory system is the packed bytes, which is the traffic a decode
-    /// step is bound by. At 1.75 bits a weight that is a ninth of what bfloat16 costs.
+    /// <para>
+    /// The row is decoded into <paramref name="scratch"/> and consumed immediately, so it never
+    /// leaves the cache; what crosses the memory system is the packed bytes, which is the traffic a
+    /// decode step is bound by. At 1.75 bits a weight that is a ninth of what bfloat16 costs.
+    /// </para>
+    /// <para>
+    /// A whole row at a time, not a block at a time. Decoding block by block put a call and a lane
+    /// reduction between every 32 or 128 weights, and the reduction is the expensive half: over a
+    /// 4608-long row it turns one horizontal sum into a hundred and forty-four.
+    /// </para>
     /// </remarks>
     private float DotQuantized(ReadOnlySpan<float> x, int row, Span<float> scratch)
     {
-        ReadOnlySpan<byte> packed = _bytes.Span.Slice(row * _rowBytes, _rowBytes);
-        int blockBytes = Quantization.TypeSize();
-        int blocks = Cols / TernaryBlockGeometry.GroupSize;
+        TernaryKernels.DecodeRow(
+            Quantization, _bytes.Span.Slice(row * _rowBytes, _rowBytes), scratch[..Cols]);
 
-        float sum = 0f;
-        for (int b = 0; b < blocks; b++)
-        {
-            TernaryKernels.DecodeRow(Quantization, packed.Slice(b * blockBytes, blockBytes), scratch);
-            sum += Gemm.Dot(x.Slice(b * TernaryBlockGeometry.GroupSize, TernaryBlockGeometry.GroupSize), scratch);
-        }
-
-        return sum;
+        return Gemm.Dot(x, scratch[..Cols]);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -116,7 +116,7 @@ internal static class Converter
                 byte[] packed = new byte[entry.Type.RowSize(entry.Cols) * entry.Rows];
                 hessians.TryGetValue(entry.Name, out double[]? hessian);
 
-                TensorQuantizationReport report = TernaryQuantizer.Quantize(
+                TensorQuantizationReport report = WeightQuantizer.Quantize(
                     entry.Name,
                     values,
                     entry.Rows,
@@ -204,10 +204,11 @@ internal static class Converter
                     type = GgmlType.F32;
                     note = "rank 1";
                 }
-                else if (cols % TernaryBlockGeometry.GroupSize != 0)
+                else if (cols % requested.BlockSize() != 0)
                 {
                     type = GgmlType.BF16;
-                    note = $"{cols} inputs is not a multiple of {TernaryBlockGeometry.GroupSize}";
+                    note = $"{cols} inputs is not a multiple of {requested.TypeName()}'s "
+                        + $"{requested.BlockSize()}-weight group";
                 }
             }
 

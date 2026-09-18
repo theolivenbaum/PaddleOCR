@@ -9,8 +9,9 @@ namespace PaddleOcrSharp.Quantization;
 /// A glob over the tensor name; <c>*</c> matches any run of characters and <c>?</c> one character.
 /// </param>
 /// <param name="Scheme">
-/// What to store a matching tensor as: <c>ptq1_0</c>, <c>pq2_0</c>, <c>bf16</c>, <c>f32</c>, or
-/// <c>source</c> to keep whatever dtype the checkpoint already holds.
+/// What to store a matching tensor as, smallest first: <c>ptq1_0</c> (1.75 bpw), <c>pq2_0</c>
+/// (2.125), <c>q4_0</c> (4.5), <c>q4_1</c> (5.0), <c>q5_1</c> (6.0), <c>q8_0</c> (8.5),
+/// <c>bf16</c>, <c>f32</c>, or <c>source</c> to keep whatever dtype the checkpoint already holds.
 /// </param>
 /// <param name="Rotate">
 /// Whether a matching tensor is folded into the rotated basis; defaults to whether it is quantized.
@@ -70,13 +71,11 @@ public sealed class QuantizationPolicy
     /// should cost what the tensor already costs.
     /// </para>
     /// <para>
-    /// The token embedding is a different case and is exempt only provisionally. Bonsai quantizes
-    /// embeddings along with everything else, and the obvious objection — that a gather would have
-    /// to decode a packed row per token — does not survive arithmetic: a row is 1024 weights, which
-    /// is eight blocks, against the 255 M parameters the same token costs in the decoder. So the
-    /// reason to leave it at bfloat16 is a suspicion about quality at 0.9B and not a cost, which
-    /// makes it exactly the kind of claim the validation ladder exists to settle. It is 212 MB of a
-    /// converted file, so settling it is worth doing.
+    /// The token embedding is quantized, which an earlier version of this policy exempted on the
+    /// grounds that a gather would have to decode a packed row per token. That does not survive
+    /// arithmetic — a row is 1024 weights against the 255 M parameters the same token costs in the
+    /// decoder — and Bonsai quantizes embeddings along with everything else. At 106 M parameters
+    /// it is 212 MB of bfloat16 that the exemption was spending for nothing measured.
     /// </para>
     /// <para>
     /// <c>lm_head</c> is none of those — 106 M parameters re-read on every generated token — so it
@@ -92,7 +91,11 @@ public sealed class QuantizationPolicy
             new QuantizationRule("*norm*", "source"),
             new QuantizationRule("*layer_norm*", "source"),
             new QuantizationRule("*.bias", "source"),
-            new QuantizationRule("*embed_tokens*", "source"),
+
+            // Listed before the position-embedding exemption below, which would otherwise catch
+            // it: this is a 32768 x 1152 table the port never reads, and at 37.7 M parameters it
+            // is worth more than every norm in the model put together.
+            new QuantizationRule("*packing_position_embedding*", "default"),
             new QuantizationRule("*position_embedding*", "source"),
             new QuantizationRule("*patch_embedding*", "source"),
         ],
@@ -122,8 +125,17 @@ public sealed class QuantizationPolicy
     /// The dtype the checkpoint holds the tensor in, which is what the <c>source</c> scheme
     /// resolves to.
     /// </param>
-    public GgmlType SchemeFor(string name, GgmlType source = GgmlType.BF16) =>
-        Parse(RuleFor(name)?.Scheme ?? DefaultScheme, name, source);
+    public GgmlType SchemeFor(string name, GgmlType source = GgmlType.BF16)
+    {
+        string scheme = RuleFor(name)?.Scheme ?? DefaultScheme;
+
+        // A rule can opt a tensor back into the default rather than naming a band, so that an
+        // exemption can be carved out of a broader glob without pinning the width.
+        return Parse(
+            string.Equals(scheme, "default", StringComparison.OrdinalIgnoreCase) ? DefaultScheme : scheme,
+            name,
+            source);
+    }
 
     /// <summary>Whether <paramref name="name"/> is folded into the rotated basis.</summary>
     /// <param name="name">Tensor name.</param>
@@ -178,9 +190,15 @@ public sealed class QuantizationPolicy
     {
         "ptq1_0" or "ptq1" => GgmlType.PTQ1_0,
         "pq2_0" or "pq2" => GgmlType.PQ2_0,
+        "q4_0" => GgmlType.Q4_0,
+        "q4_1" => GgmlType.Q4_1,
+        "q5_1" => GgmlType.Q5_1,
+        "q8_0" => GgmlType.Q8_0,
         "bf16" => GgmlType.BF16,
         "f32" or "fp32" => GgmlType.F32,
         "source" or "keep" => source,
+        "default" => throw new InvalidDataException(
+            $"A rule for '{name}' asks for the default scheme, which is resolved before this point."),
         _ => throw new InvalidDataException($"Unknown scheme '{scheme}' for '{name}'."),
     };
 
