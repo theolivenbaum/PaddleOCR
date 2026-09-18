@@ -322,19 +322,24 @@ Design: [`dotnet/docs/ternary.md`](dotnet/docs/ternary.md). Encoding investigate
 - [x] Freed the two remaining big exemptions — the token embedding (106 M) and
       `packing_position_embedding` (37.7 M, never read by this port) — taking the quantized share
       from 70.3% to 85.3%.
-- [ ] **A corpus that discriminates.** Three of the four images are identical at every band down to
-      4.5 bits: they are few-token crops and rule nothing out. Everything below `q8_0` rests on one
-      dense image. The real test is multi-block scanned pages, which needs `PP-DocLayoutV3` and a
-      longer run than this environment has had.
+- [x] **A corpus that discriminates.** `curiosity-ai/test_documents` and `PP-DocLayoutV3` are now
+      in place, so the whole pipeline runs: layout, cropping, per-block recognition, markdown.
+      Against bf16 on this repository's own benchmark pages the markdown is **byte-identical** on
+      all four — `ocr_test_original.png`, `nougat_004_scanned.pdf`, `ocr_image.jpg` (a table, 13 KB)
+      and `balance_sheet_1.png` (decode-heavy, 16 KB) — 30 KB of markdown without a differing byte.
+- [ ] The same run over the remaining bands. `q5_1` and `q4_1` have only ever been measured through
+      whole-image recognition, where three of four crops could not tell any band apart. Their real
+      standing is unknown.
 - [ ] **Measure a split policy** if a band between 1.67x and 2.14x is wanted. The vision tower is
       48.6% of the model, so `q8_0` there with `q4_1` elsewhere lands near 0.93 GB — barely better
       than `q5_1` everywhere at 0.89 GB, which is why uniform bands are what got measured.
 - [ ] Run GPTQ against the real model. Implemented and tested on synthetic tensors, never run on
       the checkpoint: it needs a calibration corpus, which this environment did not have.
-- [ ] Re-measure cost after the panel-width fix. Quantized recognition was **0.27x** — slower, not
-      faster — and `ChoosePanelWidth` sizing the panel by its packed stride is one identified
-      cause but probably not the whole of it. A decode-heavy page under `parse --profile` is what
-      would actually test the premise, and it needs a model whose decode terminates.
+- [ ] **Vectorise the integer-band decoders.** Through the real pipeline the cost runs 0.91x, 0.79x,
+      0.29x and 0.38x across the four pages — it tracks *output length*, so it is the decode step
+      and not the vision tower, which an earlier whole-image comparison had wrongly implicated.
+      `TernaryKernels` routes every integer band to the scalar reference, so `RunNarrow` decodes a
+      full weight row per dot product one element at a time. That is the first thing to fix.
 - [ ] **The 4304-wide vision projection is now the binding limit on size**: 4304 = 16 x 269 divides
       by neither the ternary group of 128 nor the integer group of 32, so 139 M parameters — 278 MB
       of the 1.15 GB `q8_0` file — stay bfloat16. Its other dimension is 1152 and divides both, so

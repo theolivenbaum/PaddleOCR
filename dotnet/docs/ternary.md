@@ -446,6 +446,36 @@ scanned page, which needs the layout model and a longer run than this one.
 That is also a caveat on the ladder above: every number in it that is not `q8_0` comes from a single
 image.
 
+### Through the whole pipeline, on real document pages
+
+Everything above went through the validator's single-image path, which recognises a whole image as
+one block. The test that matters is the pipeline a user runs: `parse`, with layout detection, block
+cropping, per-block recognition and markdown assembly. With `curiosity-ai/test_documents` and
+`PP-DocLayoutV3` in place, bf16 and `q8_0` were run over the pages this repository already
+benchmarks against, and the markdown byte-diffed:
+
+| page | blocks | markdown | bf16 | `q8_0` | |
+| --- | --- | --- | --- | --- | --- |
+| `images/ocr_test_original.png` | 1 | 95 B | 10 s | 11 s | **identical** |
+| `pdf_scanned/nougat_004_scanned.pdf` | 6 | 263 B | 31 s | 39 s | **identical** |
+| `images/ocr_image.jpg` | 5, one table | 13,186 B | 40 s | 139 s | **identical** |
+| `images/balance_sheet_1.png` | 2, decode-heavy | 16,425 B | 87 s | 232 s | **identical** |
+
+Four pages, 30 KB of markdown, not one differing byte. That is a much stronger statement than
+anything the crop corpus could make, and it is the evidence the "zero loss" claim now rests on —
+in particular `balance_sheet_1.png`, which this repository's own tuning notes single out as
+decode-heavy at 1,503 generated tokens, and which is therefore where accumulated quantization error
+had the most room to show up. It did not.
+
+**And the cost column corrects an inference made earlier in this document.** The slowdown tracks
+the *output length*, not the vision tower's work: 0.91x at 95 bytes, 0.79x at 263, 0.29x at 13,186, 0.38x at 16,425.
+Whole-image recognition had suggested the tower's panel decode was the problem, because a crop was
+near parity and a full image was not; through the real pipeline the tower is cropped small and the
+decode step dominates, and that is where the slowdown lives. It is where it should have been looked
+for from the start: `RunNarrow` decodes a whole weight row per dot product through a codec that has
+no vectorised path for the integer bands at all — `TernaryKernels` routes them to the scalar
+reference. That is the first thing to fix when speed is the subject.
+
 ### What the file size is now bounded by
 
 At `q8_0` the file is 1.15 GB, of which **278 MB is bfloat16 that no band can touch**: the vision

@@ -1123,6 +1123,14 @@ point — and the row worth reading is `q4_1`: within 70 MB of the ternary file,
 `q8_0` is now the default the converter produces unasked, because it is the band that measured zero
 loss — not because it is the smallest.
 
+Through the whole pipeline — `parse`, with layout, cropping, per-block recognition and markdown —
+against `test_documents`, the markdown is **byte-identical** on `ocr_test_original.png` (1 block),
+`nougat_004_scanned.pdf` (6 blocks), `ocr_image.jpg` (5 blocks and a table, 13 KB of output) and
+`balance_sheet_1.png` (decode-heavy, 16 KB) — four pages and 30 KB of markdown without a differing
+byte. The cost runs 0.91x, 0.79x, 0.29x and 0.38x, which tracks output length and so points at
+the decode step rather than the tower: the integer bands have no vectorised decoder, so `RunNarrow`
+decodes every weight row through the scalar reference.
+
 Size is now bounded by something structural rather than by the bit rate. 278 MB of the 1.15 GB is
 bfloat16 that no band can touch, because the vision MLP's second projection is 4304 wide and
 4304 = 16 x 269 divides by neither the ternary group of 128 nor the integer group of 32. Reaching
