@@ -184,12 +184,18 @@ Tests that need fixtures are skipped, not failed, when the fixture directory is 
 
 ## Where the time goes
 
+> **How to measure, as opposed to what was measured, is a skill:**
+> [`.claude/skills/measuring-performance`](.claude/skills/measuring-performance/SKILL.md).
+> Read it before benchmarking, profiling, or accepting or rejecting a performance change. It
+> covers calibrating the machine first, making sure the code under test is compiled, best-of-N
+> with the spread, interleaved A/B runs against a control, the microbenchmark traps that report a
+> fifth of the truth, and how to pin an output. Everything in this section is the *record* those
+> rules produced.
+
 `paddleocr-sharp bench` starts by measuring the machine, before it loads anything: the FMA rate
 the hardware sustains at each vector width, at one thread and at every thread, and the read
-bandwidth at each level of the hierarchy. A shared virtual machine is not a constant — the core
-count is whatever the hypervisor schedules, the clock moves with the host's AVX-512 licence state,
-and a noisy neighbour halves the memory bandwidth between one run and the next. Absolute
-milliseconds from different days are not comparable, so the run prints its own ceilings and the
+bandwidth at each level of the hierarchy. A shared virtual machine is not a constant, so absolute
+milliseconds from different days are not comparable: the run prints its own ceilings and the
 per-sample spread beside every figure, and `--gemm true` reports each GEMM shape as a fraction of
 the ceiling just measured. On the reference machine that spread runs from 10% to 40%, which is
 wider than most differences worth acting on: nothing below was accepted without an A/B in one
@@ -681,24 +687,16 @@ degree, which it has to be — nothing here changes the arithmetic or its order.
 
 #### `ArrayPool<T>.Shared` is not the pool its reputation says
 
-`TensorPool` existed because "the default shared pool caps buckets at 1 MiB (2^20 bytes)". That
-was true of .NET Framework and has not been true for years. Measured, the shared pool round-trips
-a **1 GiB** float array with zero allocation, at every size from 1 MiB up.
+`TensorPool` existed because "the default shared pool caps buckets at 1 MiB (2^20 bytes)", which
+was true of .NET Framework and has not been true for years. The measurement that settles it, and
+the rule that follows from it, are in
+[`measuring-performance`](.claude/skills/measuring-performance/SKILL.md) §8; what matters here is
+the consequence for this port.
 
-Believing it made things worse rather than neutral, because `ArrayPool.Create(_,
-maxArraysPerBucket)` keeps only that many buffers of a size and drops the rest, where the shared
-pool keeps them. Over a rent-and-return round of N live 4 MiB buffers:
-
-| N | shared | created(16) |
-| --- | --- | --- |
-| 16 | 0 MiB | 0 MiB |
-| 36 | 0 MiB | 16 MiB |
-| 64 | 0 MiB | 128 MiB |
-
-Thirty-six of one size is exactly what `KvCache` holds, two per layer, and one growth at the
-decoder's geometry is 576 MiB — so a cache on a created pool would churn 66 MiB per block where
-the shared pool churns nothing. `KvCacheTests` pins it. **Before adding a pool of your own here,
-measure the shared one.**
+Thirty-six live buffers of one size is exactly what `KvCache` holds, two per layer, and one growth
+at the decoder's geometry is 576 MiB — so a cache on a created pool would churn 66 MiB per block
+where the shared pool churns nothing. `KvCacheTests` pins it. **Before adding a pool of your own
+here, measure the shared one.**
 
 ### Where the vision tower's time goes
 
@@ -938,6 +936,11 @@ under sixty would take a materially better GEMM, not another pass over this pipe
 
 Each of these is a plausible optimisation that the benchmark rejected. They are recorded because
 the argument for them is still convincing on paper, and someone will otherwise try them again.
+**Add to this list whenever an experiment is rejected**, with the measurement that rejected it.
+Four of the entries below generalise past this port — interleave the configurations, establish
+what a stage is bound by before tuning its inner loop, never act on a diagnosis inherited from a
+comment, and the two cold-start answers that did not work — and the generalised forms are in
+[`measuring-performance`](.claude/skills/measuring-performance/SKILL.md).
 
 - **Banding `Gemm.Linear` over activation rows**, so a band stays cached across all the column
   panels. Consistently slower; the panel loop's traffic is evidently already absorbed by the
@@ -1030,21 +1033,14 @@ the argument for them is still convincing on paper, and someone will otherwise t
   the register file. See `Core/Simd.cs`; the override is left to whoever measures their own
   machine.
 
-### Two traps that make a SIMD microbenchmark lie
+### Traps that make a SIMD microbenchmark lie
 
-Both were hit while building the calibration above, and both report roughly a fifth of the truth
-while looking entirely reasonable.
-
-- **Accumulators that start equal.** Eight chains seeded to zero and updated identically are
-  provably the same value, so the JIT emits one `vfmadd231ps` reusing a single register. The loop
-  then measures FMA latency rather than throughput. Seed them differently.
-- **Consuming the result through a `volatile` field.** The release barrier makes the JIT keep
-  every SIMD local in the frame across the loop, so the body becomes load-operate-store and
-  reports store-forwarding throughput. `GC.KeepAlive` prevents dead-code elimination without
-  touching register allocation.
-
-A third, related: an indexed accumulator — an array or a `stackalloc` span — is never
-enregistered, so the chains have to be named locals.
+Three of them — accumulators seeded equal, a result consumed through a `volatile` field, and an
+indexed accumulator that is never enregistered — each report roughly a fifth of the truth while
+looking entirely reasonable, and all three were hit while building the calibration above. They
+generalise past this port, so they live in
+[`measuring-performance`](.claude/skills/measuring-performance/SKILL.md) §6 with the rest of the
+method. Read that before writing a microbenchmark; `MachineProfile.cs` is the worked example.
 
 ## What the pipeline does beyond the models
 
@@ -1088,6 +1084,11 @@ which swaps the red and blue weights and so decides which pixels of a formula su
    (renamed to `*.disabled`) for the duration of the port; do not re-enable them.
 5. Do not modify the upstream Python packages (`paddleocr/`, `ppocr/`, `ppstructure/`, …)
    — the port is additive and lives entirely under `dotnet/`.
+6. Performance work follows
+   [`.claude/skills/measuring-performance`](.claude/skills/measuring-performance/SKILL.md). It is
+   this port's own skill and is unrelated to the disabled upstream `skills/` in item 4. A timing
+   claim that does not satisfy its checklist does not land, and a rejected experiment is written
+   up under "Things that looked like wins and were not" rather than forgotten.
 
 ## Publishing
 
